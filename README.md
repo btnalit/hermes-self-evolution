@@ -2,144 +2,174 @@
 
 **Give your Hermes agent metacognition — periodic self-reflection, capability gap detection, proactive improvement proposals, and a full governance pipeline.**
 
-![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-brightgreen)
-![Hermes Agent](https://img.shields.io/badge/Hermes%20Agent-compatible-purple)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-brightgreen)]()
+[![Hermes Agent](https://img.shields.io/badge/Hermes%20Agent-compatible-purple)]()
+[![GitHub release](https://img.shields.io/github/v/release/btnalit/hermes-self-evolution)]()
+[![GitHub last commit](https://img.shields.io/github/last-commit/btnalit/hermes-self-evolution)]()
 
 ---
 
+A self-contained **metacognitive governance system** for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It runs a daily pipeline that collects environmental signals, scores improvement opportunities, matures strategic agendas, and injects runtime context back into agent sessions — closing the feedback loop without requiring code changes to the Hermes core.
+
 ## Architecture Overview
 
-The Self-Evolution Governor implements a closed-loop metacognitive pipeline that runs periodically to audit the agent's own performance, detect gaps, and propose improvements — then optionally applies them.
-
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    SELF-EVOLUTION PIPELINE                       │
-│                                                                  │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐  │
-│  │ 1. AUDIT  │───▶│ 2. SCORE │───▶│ 3. STORE │───▶│ 4. PLAN  │  │
-│  │(sources)  │    │(formula) │    │(journal) │    │(agenda)  │  │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘  │
-│       │               │               │               │         │
-│       ▼               ▼               ▼               ▼         │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐  │
-│  │ 5.VETO   │◀───│ 6.APPLY  │◀───│ 7.REVIEW │◀───│(proposals)│  │
-│  │(threshold)│    │(scripts) │    │(results) │    │          │  │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘  │
-│       │                                                         │
-│       └──────────────(loop back to Step 1)────────────────────▶│
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+                          SELF-EVOLUTION CLOSED LOOP
+                                ┌─────────────────┐
+                    ┌──────────▶│  1. COLLECT      │
+                    │           │  (16 signal src) │
+                    │           └────────┬─────────┘
+                    │                    ▼
+                    │           ┌─────────────────┐
+                    │           │  2. MATURE       │
+                    │           │  (agenda engine) │
+                    │           └────────┬─────────┘
+                    │                    ▼
+                    │           ┌─────────────────┐
+                    │           │  3. SPEAK GATE   │
+                    │           │  (score + quota) │
+                    │           └────────┬─────────┘
+                    │                    ▼
+                    │           ┌─────────────────┐
+                    │           │  4. PROPOSE      │
+                    │           │  (queue + route) │
+                    │           └────────┬─────────┘
+                    │                    ▼
+                    │           ┌─────────────────┐
+                    │           │  5. INJECT       │
+                    │           │  (runtime digest)│
+                    │           └────────┬─────────┘
+                    │                    ▼
+                    │     User reviews → approves → executes
+                    │                    │
+                    └────────────────────┘
 ```
 
 ## Features
 
-- **🔍 Metacognitive Audit** — Scans 16+ signals across 3 phases to detect capability gaps, error patterns, and stagnation.
-- **📊 Weighted Scoring** — Each proposal is scored with a confidence formula combining evidence strength, frequency, impact, and recency.
-- **📓 Evolution Journal** — Persistent, timestamped record of all audits, proposals, and their resolutions.
-- **📋 Revision Agenda** — Structured backlog of improvement proposals with status tracking.
-- **⚙️ Configurable Thresholds** — Five knobs to tune sensitivity, from proposal surfacing to cool-down periods.
-- **🔌 Plugin Architecture** — Optional `runtime_digest` plugin for deeper runtime introspection.
-- **🚀 Portable Design** — All paths relative to `$HERMES_HOME` via `_paths.py`.
-- **📦 Demo-Ready** — Ships with sample state files so you can inspect the pipeline immediately after install.
+- **🔍 16+ Signal Sources** — Scans ops-gate results, cron status, skill health, memory quality, tool reliability, config changes, proposal feedback, gateway health, and more.
+- **📊 Two-Tier Scoring** — `priority_score` (worth talking about?) + `speak_score` (worth interrupting the user?) with risk dampeners, strategic bonuses, and daily quotas.
+- **📓 Evolution Journal** — Persistent timestamped audit trail of all observations, score changes, and proposal transitions.
+- **📋 Proposal State Machine** — 10-state lifecycle: `draft → pending → approved → scheduled → running → implemented → verified`.
+- **🧠 Agenda Maturation Engine** — Long-term agenda items mature over time as evidence accumulates. Structural vs actionable evidence separation prevents false positives.
+- **⚙️ Configurable Thresholds** — Defaults: maturity score 0.72, min evidence 3, observation window 3 days. All tunable.
+- **🔌 Optional Plugin** — `runtime_digest` auto-injection plugin for Hermes sessions (`on_session_start` hook).
+- **🚀 Zero Core Patches** — All scripts run from the skill directory. No modifications to Hermes source code needed.
 
 ## Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/NousResearch/hermes-self-evolution.git
+# Clone
+git clone https://github.com/btnalit/hermes-self-evolution.git
 cd hermes-self-evolution
 
-# Run the setup script
+# Install
+export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 bash setup.sh
+
+# Run the pipeline manually
+cd "$HERMES_HOME/skills/dogfood/self-evolution-governor/scripts"
+python3 collect_signals.py
+python3 agenda_maturation.py --emit-candidates
+python3 build_runtime_digest.py
+
+# Optional: install the Hermes plugin
+hermes plugins install "$(pwd)/../../../../plugin/hermes-self-evolution" --enable
 ```
 
-The setup script will:
-1. Verify `$HERMES_HOME` is set
-2. Create the directory structure under `$HERMES_HOME/self-evolution/`
-3. Copy pipeline scripts and configuration
-4. Optionally prompt to install the runtime_digest plugin
-5. Place demo state files for immediate exploration
+## Pipeline Scripts
 
-## How It Works
+| Step | Script | Purpose | Input → Output |
+|------|--------|---------|----------------|
+| **1. Audit** | `collect_signals.py` | Collect 16 signal sources | state/ files, cron output → `signals.jsonl` |
+| **2. Route** | `proposal_router.py` | Proposal state machine + verify + cleanup | `proposal_queue.yaml` → Updated status |
+| **3. Mature** | `agenda_maturation.py` | Long-term agenda maturity engine | Agenda + signals → candidates |
+| **4. Gate** | `speak_gate.py` | Score, gate, quota for proposals | Proposals → speak/digest/silent decision |
+| **5. Inject** | `build_runtime_digest.py` | Generate session context digest | Signals + proposals → `runtime_digest.md` |
 
-The pipeline runs on a configurable schedule (default: daily) and executes six steps:
-
-| Step | Script | Purpose |
-|------|--------|---------|
-| **1. Audit** | `1_audit_sources.sh` | Collects 16 signals from 3 phases: error logs, interaction patterns, evolution history |
-| **2. Score** | `2_score_proposals.sh` | Applies the weighted scoring formula to each detected gap |
-| **3. Store** | `3_store_journal.sh` | Writes findings to `evolution_journal.md` with timestamps and explanations |
-| **4. Plan** | `4_plan_agenda.sh` | Generates or updates the revision agenda with scored proposals |
-| **5. Veto** | `5_veto_threshold.sh` | Filters proposals below `min_score_to_surface` and deduplicates |
-| **6. Apply** | `6_apply_proposal.sh` | Executes approved improvement proposals (configurable auto-apply or manual) |
+**Daily cron order (04:00):**
+```
+1. collect_signals.py
+2. proposal_router.py --cleanup
+3. proposal_router.py --verify-implemented
+4. agenda_maturation.py --write-journal --emit-candidates
+5. speak_gate.py --include-agenda-candidates
+6. build_runtime_digest.py
+```
 
 ## File Structure
 
 ```
-$HERMES_HOME/self-evolution/
-├── 1_audit_sources.sh      # Step 1: Signal collection
-├── 2_score_proposals.sh     # Step 2: Scoring
-├── 3_store_journal.sh       # Step 3: Journaling
-├── 4_plan_agenda.sh         # Step 4: Agenda generation
-├── 5_veto_threshold.sh      # Step 5: Threshold filtering
-├── 6_apply_proposal.sh      # Step 6: Proposal application
-├── _paths.py                # Portable path resolution
-├── install_plugin.sh        # Plugin installer (optional)
-├── state/
-│   ├── evolution_journal.md # Audit history
-│   ├── revision_agenda.md   # Proposed improvements
-│   ├── state.json           # Internal pipeline state
-│   └── signals_cache.json   # Cached signal data
-├── plugins/
-│   └── runtime_digest.py    # Optional introspection plugin
-└── demo/
-    ├── example_journal.md   # Demo journal for evaluation
-    └── example_agenda.md    # Demo agenda for evaluation
+hermes-self-evolution/
+├── README.md                         # This file
+├── CHANGELOG.md
+├── setup.sh                          # Idempotent deployment script
+├── .gitignore
+│
+├── skills/self-evolution-governor/   # Core skill package
+│   ├── SKILL.md                      # 800-line skill definition
+│   ├── scripts/
+│   │   ├── _paths.py                 # Portable path resolver ($HERMES_HOME)
+│   │   ├── collect_signals.py        # 16 signal collectors
+│   │   ├── proposal_router.py        # Proposal lifecycle state machine
+│   │   ├── agenda_maturation.py      # Agenda maturity scoring engine
+│   │   ├── speak_gate.py             # Two-tier scoring + quota system
+│   │   └── build_runtime_digest.py   # Session context digest builder
+│   └── templates/
+│       └── proposal.yaml             # Proposal template
+│
+├── plugin/hermes-self-evolution/     # Optional Hermes plugin
+│   ├── plugin.yaml
+│   ├── __init__.py                   # on_session_start hook
+│   └── README.md
+│
+├── demo/                             # Example state files
+│   ├── signals.jsonl.example
+│   ├── self_agenda.yaml.example
+│   ├── proposal_queue.yaml.example
+│   ├── agenda_candidates.yaml.example
+│   ├── runtime_digest.md.example
+│   └── evolution_journal.md.example
+│
+└── docs/
+    ├── architecture.md               # System architecture deep dive
+    └── tuning.md                     # Threshold configuration guide
 ```
 
 ## Prerequisites
 
-- **Hermes Agent** installed and running (required for signal sources)
-- **Python 3.10+** (for plugin scripts and score computation)
-- **Bash 4.0+** (for pipeline scripts)
+- **Hermes Agent** installed and running
+- **Python 3.10+**
 - **Unix-like environment** (Linux / macOS / WSL)
 
 ## Configuration
 
-All tuning is done via environment variables or a `.env` file in the self-evolution directory:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `min_score_to_surface` | 0.72 | Minimum maturity score to produce a candidate |
+| `min_evidence_count` | 3 | Minimum evidence entries before candidate_ready |
+| `min_observation_days` | 3 | Minimum observation window before surfacing |
+| `cooldown_days` | 7 | Don't re-surface same agenda item within N days |
+| `max_surface_per_day` | 1 | Max one mature agenda surfaced daily |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SELF_EVOLVE_MIN_SCORE` | `0.72` | Minimum score to surface a proposal |
-| `SELF_EVOLVE_MIN_EVIDENCE` | `3` | Minimum evidence count to consider a gap |
-| `SELF_EVOLVE_COOLDOWN_DAYS` | `7` | Days before re-evaluating a rejected gap |
-| `SELF_EVOLVE_MAX_PROPOSALS` | `5` | Maximum proposals per cycle |
-| `SELF_EVOLVE_AUTO_APPLY` | `false` | Auto-apply proposals (true) or require manual review (false) |
+See [`docs/tuning.md`](docs/tuning.md) for detailed tuning guidance and scenario-based profiles.
 
 ## Plugin Installation (Optional)
 
-The `runtime_digest` plugin provides deeper runtime introspection during the audit phase. To install:
-
 ```bash
-bash install_plugin.sh
+hermes plugins install ./plugin/hermes-self-evolution --enable
 ```
 
-This enables additional signal sources including memory pressure, token usage patterns, and call frequency analysis.
+The plugin uses the `on_session_start` hook to log runtime digest availability. Actual digest injection happens via the skill's SKILL.md instructions, which are loaded into every session.
 
 ## Video Series
 
-Learn the full system through our YouTube video series:
-
-- **Episode 1:** What is Metacognitive Self-Evolution? (link TBD)
-- **Episode 2:** Architecture Deep Dive & Pipeline Walkthrough (link TBD)
-- **Episode 3:** Tuning & Threshold Configuration (link TBD)
-- **Episode 4:** Custom Plugin Development (link TBD)
-- **Episode 5:** Production Deployment Best Practices (link TBD)
+- **Episode 1:** What is Self-Evolution Governance?
+- **Episode 2:** Architecture Deep Dive & Pipeline Walkthrough *(coming soon)*
+- **Episode 3:** Tuning & Production Deployment
 
 ## Contributing
-
-Contributions are welcome! Please follow these guidelines:
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -147,12 +177,12 @@ Contributions are welcome! Please follow these guidelines:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-Please ensure all pipeline scripts remain portable (use `_paths.py` for path resolution) and include demo state files for any new features.
+All pipeline scripts must remain portable — use `_paths.py` for path resolution, never hardcode paths.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE) for details.
 
 ---
 
-*Built by Nous Research. Inspired by the principle that agents should improve themselves.*
+*Built for Hermes Agent. Agents should improve themselves.*
