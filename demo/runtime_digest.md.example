@@ -1,0 +1,38 @@
+# Example state file for self-evolution-governor — modify for your environment
+# runtime_digest.md — Session-injection digest produced by the
+# self-evolution-governor. This content is injected into the system
+# prompt at the start of each session so the agent is aware of its
+# own improvement landscape.
+
+> Generated at: 2026-05-15T04:00:00+08:00
+> Next scheduled: 2026-05-16T04:00:00+08:00
+
+## 📊 Agenda Overview
+
+| Item                                                           | Score | Trend     | Status |
+|----------------------------------------------------------------|-------|-----------|--------|
+| Identify recurring manual workflows                            | 0.72  | ▲ rising  | active |
+| Track skill staleness patterns                                 | 0.55  | → stable  | active |
+| Evaluate memory-file compaction triggers                       | 0.30  | → stable  | paused |
+
+## 🚀 Proposals Awaiting Action
+
+- **prop-20260515-001** · draft · *Add CSV-to-JSON conversion skill*
+  → Ready for review — high priority (0.7)
+- **prop-20260514-002** · approved · *Retire legacy-formatter skill*
+  → Approved; needs implementation
+
+## ⚠️ Notable Signals (last 6)
+
+- `ops_gate_result` — **pass** (6 s) — pipeline healthy
+- `cron_result` — daily-reflection ✓ — no errors
+- `config_change` — skills/my-skill/SKILL.md **modified**
+- `memory_quality` — 1.5 KB — ✓ no warning
+- `skill_health_snapshot` — 25 skills, **3 stale**
+- `proposal_feedback` — 3 proposals to process
+
+## 💡 Next Actions
+
+1. Review proposal **prop-20260515-001** (CSV-to-JSON) — draft needs approval
+2. Implement **prop-20260514-002** (retire legacy-formatter)
+3. Monitor agenda item *memory compaction* — score too low, keep paused

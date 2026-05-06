@@ -1,0 +1,140 @@
+# Example state file for self-evolution-governor — modify for your environment
+# proposal_queue.yaml — Queued self-improvement proposals.
+# Each proposal describes a change to the agent's own configuration,
+# skills, or behaviour. They flow through states: draft → submitted →
+# approved → implemented (or rejected).
+
+version: 1
+generated_at: "2026-05-15T04:00:00+08:00"
+proposals:
+
+  # ------------------------------------------------------------------
+  # Proposal 1: Draft — idea being refined
+  # ------------------------------------------------------------------
+  - id: "prop-20260515-001"
+    title: "Add CSV-to-JSON conversion skill"
+    status: draft
+    priority: 0.7
+    created_at: "2026-05-15T03:30:00+08:00"
+    updated_at: "2026-05-15T03:30:00+08:00"
+
+    lineage:
+      triggered_by: "agenda-20260515-001"
+      source_signals:
+        - ts: "2026-05-14T18:30:00+08:00"
+          type: "proposal_feedback"
+          source: "conversation-log"
+        - ts: "2026-05-14T09:15:00+08:00"
+          type: "proposal_feedback"
+          source: "skill-invocation-log"
+
+    description: >
+      Create a new skill `csv-to-json` that accepts a CSV file path
+      and returns a JSON representation. The agenda item on recurring
+      workflows has flagged this as a high-frequency manual task.
+
+    expected_impact:
+      metric: "time_saved_per_week"
+      estimate: "~15 min"
+      confidence: 0.75
+
+    implementation_hint:
+      language: python
+      entrypoint: "$HERMES_HOME/skills/data/csv-to-json/csv_to_json.py"
+      dependencies: []
+
+    approval:
+      approved_by: null
+      approved_at: null
+      rejection_reason: null
+
+    implementation:
+      implemented_at: null
+      commit_hash: null
+      notes: ""
+
+  # ------------------------------------------------------------------
+  # Proposal 2: Approved — ready to implement
+  # ------------------------------------------------------------------
+  - id: "prop-20260514-002"
+    title: "Retire legacy-formatter skill"
+    status: approved
+    priority: 0.5
+    created_at: "2026-05-14T12:00:00+08:00"
+    updated_at: "2026-05-15T04:00:00+08:00"
+
+    lineage:
+      triggered_by: "agenda-20260515-002"
+      source_signals:
+        - ts: "2026-05-14T04:00:04+08:00"
+          type: "skill_health_snapshot"
+          source: "skills"
+        - ts: "2026-05-15T04:00:04+08:00"
+          type: "skill_health_snapshot"
+          source: "skills"
+
+    description: >
+      The `legacy-formatter` skill has had zero invocations in the last
+      45 days and its format (Markdown→LaTeX) has been superseded by
+      the newer `md-tex-pandoc` skill. Recommend archival.
+
+    expected_impact:
+      metric: "skill_count_reduction"
+      estimate: "reduce stale skills from 3 to 2"
+      confidence: 0.9
+
+    implementation_hint:
+      action: "move_to_archive"
+      target: "$HERMES_HOME/skills/retired/legacy-formatter"
+
+    approval:
+      approved_by: "auto-governor"
+      approved_at: "2026-05-15T04:00:00+08:00"
+      rejection_reason: null
+
+    implementation:
+      implemented_at: null
+      commit_hash: null
+      notes: "Pending safe removal — check for any remaining references"
+
+  # ------------------------------------------------------------------
+  # Proposal 3: Implemented — completed
+  # ------------------------------------------------------------------
+  - id: "prop-20260510-003"
+    title: "Add daily-reflection cron job"
+    status: implemented
+    priority: 0.6
+    created_at: "2026-05-10T08:00:00+08:00"
+    updated_at: "2026-05-12T06:00:00+08:00"
+
+    lineage:
+      triggered_by: "agenda-20260430-001"
+      source_signals:
+        - ts: "2026-05-09T22:00:00+08:00"
+          type: "cron_result"
+          source: "cron-output"
+
+    description: >
+      Schedule a daily reflection job at 04:00 UTC that runs the
+      self-evaluation cycle: check signal health, update agenda
+      scores, and generate a runtime digest for session injection.
+
+    expected_impact:
+      metric: "self_improvement_velocity"
+      estimate: "1 automatic review cycle per day"
+      confidence: 0.85
+
+    implementation_hint:
+      action: "add_cron_entry"
+      job_id: "daily-reflection"
+      schedule: "0 4 * * *"
+
+    approval:
+      approved_by: "auto-governor"
+      approved_at: "2026-05-11T06:00:00+08:00"
+      rejection_reason: null
+
+    implementation:
+      implemented_at: "2026-05-12T06:00:00+08:00"
+      commit_hash: "a1b2c3d4e5f6..."
+      notes: "Cron entry added to /etc/cron.d/hermes-evolution"

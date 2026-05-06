@@ -1,0 +1,6 @@
+name: hermes-self-evolution
+version: 1.0.0
+description: "Runtime context bridge for self-evolution-governor — ensures runtime_digest.md is available for injection into each session."
+author: "Hermes Agent Community"
+hooks:
+  - on_session_start

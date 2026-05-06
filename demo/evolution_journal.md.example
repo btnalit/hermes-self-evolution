@@ -1,0 +1,24 @@
+# Example state file for self-evolution-governor — modify for your environment
+# evolution_journal.md — Append-only log of notable self-evolution
+# events: proposal milestones, agenda promotions, configuration changes,
+# and any anomalies encountered.
+
+## 2026-05-15
+
+- **04:00:05** — Agenda score recalculated:
+  - *agenda-20260515-001* (recurring workflows) → 0.72 (▲ rising)
+  - *agenda-20260515-002* (skill staleness) → 0.55 (→ stable)
+  - *agenda-20260515-003* (memory compaction) → 0.30 (→ stable)
+- **04:00:04** — Skill health snapshot: 3 stale skills detected (legacy-formatter, old-pdf-gen, temp-cleanup-v1)
+- **03:30:00** — New draft proposal created: *prop-20260515-001* "Add CSV-to-JSON conversion skill" (triggered by agenda-20260515-001)
+
+## 2026-05-14
+
+- **12:00:00** — Proposal *prop-20260514-002* "Retire legacy-formatter skill" moved to **approved** by auto-governor
+- **10:00:00** — Agenda item *agenda-20260515-003* (memory compaction) set to **paused** — insufficient evidence to continue
+- **04:00:04** — Signal batch processed: 6 new signals ingested
+
+## 2026-05-13
+
+- **22:00:00** — Memory growth anomaly: +25% in 24h (1.2 KB → 1.5 KB), logged as evidence for agenda-20260515-003
+- **08:00:00** — Cron job *daily-reflection* ran successfully for the first time

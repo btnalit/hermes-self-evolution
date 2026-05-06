@@ -1,0 +1,168 @@
+# Example state file for self-evolution-governor — modify for your environment
+# self_agenda.yaml — Current active agenda items that the agent pursues.
+# Each item includes evidence matchers (what the agent looks for), recent
+# evidence (what it found), a score, and a maturity policy controlling
+# lifecycle.
+
+version: 1
+generated_at: "2026-05-15T04:00:00+08:00"
+agenda_items:
+
+  # ------------------------------------------------------------------
+  # Item 1: Identify recurring manual workflows that could be automated
+  # ------------------------------------------------------------------
+  - id: "agenda-20260515-001"
+    title: "Identify recurring manual workflows"
+    description: >
+      Scan conversation history and skill logs for repetitive manual
+      steps (file conversions, data lookups, formatting tasks) and
+      propose new automation skills or aliases to eliminate them.
+    priority: 0.8
+    status: active         # active | paused | completed | archived
+    created_at: "2026-05-10T08:00:00+08:00"
+    updated_at: "2026-05-15T04:00:00+08:00"
+
+    # --- Evidence matchers -------------------------------------------
+    evidence_matchers:
+      - matcher: "repetitive_task"
+        description: "Detect patterns like 'again', 'same as before', 'repeat' in user messages"
+        severity_threshold: 0.6
+      - matcher: "manual_conversion"
+        description: "Flag interactions involving format conversions (csv→json, md→html, etc.)"
+        severity_threshold: 0.5
+      - matcher: "lookup_hotspot"
+        description: "Track frequently requested lookups (docs, status, definitions)"
+        severity_threshold: 0.4
+
+    # --- Collected evidence ------------------------------------------
+    evidence:
+      - ts: "2026-05-14T18:30:00+08:00"
+        source: "conversation-log"
+        matcher: "repetitive_task"
+        snippet: "User asked 'convert csv to json' for the 4th time this week"
+        severity: 0.7
+      - ts: "2026-05-14T09:15:00+08:00"
+        source: "skill-invocation-log"
+        matcher: "manual_conversion"
+        snippet: "csv-to-json skill does not exist; user typed manual pipeline"
+        severity: 0.6
+      - ts: "2026-05-13T22:00:00+08:00"
+        source: "conversation-log"
+        matcher: "lookup_hotspot"
+        snippet: "Status of deployment pipeline requested 3 times in one session"
+        severity: 0.5
+
+    # --- Current score -----------------------------------------------
+    score:
+      current: 0.72
+      trend: rising        # rising | stable | falling
+      last_calculated: "2026-05-15T04:00:00+08:00"
+      calculation_method: "weighted_avg_with_recency_bonus"
+
+    # --- Maturity policy ---------------------------------------------
+    maturity_policy:
+      min_evidence_count: 3
+      min_score_to_keep: 0.3
+      max_age_days: 30
+      archive_after_days_inactive: 14
+      escalation:
+        - threshold: 0.5
+          action: "flag_for_review"
+        - threshold: 0.8
+          action: "auto_generate_proposal"
+
+  # ------------------------------------------------------------------
+  # Item 2: Track skill staleness patterns
+  # ------------------------------------------------------------------
+  - id: "agenda-20260515-002"
+    title: "Track skill staleness patterns"
+    description: >
+      Monitor skill-health snapshots for skills that haven't been
+      invoked or updated in a configurable window, and flag them for
+      retirement or refresh.
+    priority: 0.6
+    status: active
+    created_at: "2026-05-08T12:00:00+08:00"
+    updated_at: "2026-05-15T04:00:00+08:00"
+
+    evidence_matchers:
+      - matcher: "skill_not_invoked"
+        description: "Skill with no invocations in the last 14 days"
+        severity_threshold: 0.4
+      - matcher: "skill_not_updated"
+        description: "Skill with no SKILL.md change in the last 30 days"
+        severity_threshold: 0.3
+
+    evidence:
+      - ts: "2026-05-15T04:00:04+08:00"
+        source: "signal:skill_health_snapshot"
+        matcher: "skill_not_invoked"
+        snippet: "3 stale skills detected (total_skills=25, stale_count=3)"
+        severity: 0.5
+      - ts: "2026-05-14T04:00:04+08:00"
+        source: "signal:skill_health_snapshot"
+        matcher: "skill_not_updated"
+        snippet: "Skill 'legacy-formatter' not updated in 45 days"
+        severity: 0.4
+
+    score:
+      current: 0.55
+      trend: stable
+      last_calculated: "2026-05-15T04:00:00+08:00"
+      calculation_method: "weighted_avg_with_recency_bonus"
+
+    maturity_policy:
+      min_evidence_count: 2
+      min_score_to_keep: 0.2
+      max_age_days: 45
+      archive_after_days_inactive: 21
+      escalation:
+        - threshold: 0.4
+          action: "flag_for_review"
+        - threshold: 0.7
+          action: "auto_generate_proposal"
+
+  # ------------------------------------------------------------------
+  # Item 3: Propose better memory summarization
+  # ------------------------------------------------------------------
+  - id: "agenda-20260515-003"
+    title: "Evaluate memory-file compaction triggers"
+    description: >
+      Watch memory_quality signals for warnings (size approaching
+      limit) and propose proactive compaction or tiered summarization.
+    priority: 0.4
+    status: paused
+    created_at: "2026-05-12T16:00:00+08:00"
+    updated_at: "2026-05-14T10:00:00+08:00"
+
+    evidence_matchers:
+      - matcher: "memory_size_warning"
+        description: "memory_quality signal with warning=true"
+        severity_threshold: 0.6
+      - matcher: "rapid_memory_growth"
+        description: "memory size increasing >10% between consecutive snapshots"
+        severity_threshold: 0.5
+
+    evidence:
+      - ts: "2026-05-14T10:00:00+08:00"
+        source: "signal:memory_quality"
+        matcher: "rapid_memory_growth"
+        snippet: "Memory grew from 1.2 KB to 1.5 KB in 24h (+25%)"
+        severity: 0.45
+
+    score:
+      current: 0.30
+      trend: stable
+      last_calculated: "2026-05-15T04:00:00+08:00"
+      calculation_method: "weighted_avg_with_recency_bonus"
+
+    maturity_policy:
+      min_evidence_count: 1
+      min_score_to_keep: 0.15
+      max_age_days: 30
+      archive_after_days_inactive: 14
+      escalation:
+        - threshold: 0.6
+          action: "flag_for_review"
+        - threshold: 0.75
+          action: "auto_generate_proposal"

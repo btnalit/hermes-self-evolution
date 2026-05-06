@@ -1,0 +1,7 @@
+# Example state file for self-evolution-governor — modify for your environment
+{"ts": "2026-05-15T04:00:00+08:00", "type": "ops_gate_result", "source": "ops-gate", "task_name": "self-evolution-pipeline", "pass": true, "duration_sec": 6}
+{"ts": "2026-05-15T04:00:01+08:00", "type": "cron_result", "source": "cron-output", "job_id": "daily-reflection", "mtime": "2026-05-15T04:00:00+08:00", "has_error": false}
+{"ts": "2026-05-15T04:00:02+08:00", "type": "config_change", "source": "skills", "path": "$HERMES_HOME/skills/category/my-skill/SKILL.md", "change": "modified", "mtime": "2026-05-15T03:50:00+08:00"}
+{"ts": "2026-05-15T04:00:03+08:00", "type": "memory_quality", "source": "memory-file", "target": "memory", "size_bytes": 1536, "size_kb": 1.5, "warning": false}
+{"ts": "2026-05-15T04:00:04+08:00", "type": "skill_health_snapshot", "source": "skills", "total_skills": 25, "stale_count": 3}
+{"ts": "2026-05-15T04:00:05+08:00", "type": "proposal_feedback", "source": "proposal-queue", "total_proposals": 8, "pending": 1, "approved": 2, "rejected": 1, "needs_review": true}

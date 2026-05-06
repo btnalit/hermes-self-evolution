@@ -1,0 +1,26 @@
+# Proposal Template for Self-Evolution Governor V1.2
+# Copy this and fill in the fields when generating a proposal.
+
+title: ""
+type: "skill_creation"  # memory_update | skill_creation | skill_update | workflow_automation | cron_job | config_audit | documentation | monitoring | tool_change | strategic_reflection
+
+# ── Scoring Dimensions (0.0~1.0) ──
+impact: 0.5     # How much does this improve long-term efficiency?
+recurrence: 0.5  # How often does this problem/opportunity appear?
+confidence: 0.5  # How strong is the evidence?
+
+# ── Governance ──
+risk_level: "none"   # none | low | medium | high | critical
+actionability: 0.5   # 0.0~1.0: Is there a clear, concrete action to take?
+urgent: false        # true = bypass speak gate, direct alert
+repeat_penalty: 0.0  # 0.0~0.2: penalty if this was proposed before
+
+# ── Metadata ──
+evidence: ""
+expected_benefit: ""
+approval_required: true
+suggested_action: ""
+rollback: ""
+verification: ""
+status: "pending"  # pending | approved | rejected | implemented | failed
+created_at: ""

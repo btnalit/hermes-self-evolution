@@ -1,0 +1,25 @@
+# Example state file for self-evolution-governor — modify for your environment
+# agenda_candidates.yaml — Candidate agenda items mined from signals.
+# The governor evaluates these and may promote them into self_agenda.yaml.
+# When empty, the list simply contains no candidates.
+
+version: 1
+generated_at: "2026-05-15T04:00:00+08:00"
+
+candidates: []
+  # Example of a candidate entry (uncomment to use):
+  #
+  # - id: "candidate-20260515-001"
+  #   title: "Detect redundant skill overlap"
+  #   description: >
+  #     After retiring legacy-formatter, scan remaining skills for
+  #     functional overlap (e.g., two markdown-to-HTML converters).
+  #   source_signals:
+  #     - ts: "2026-05-15T04:00:04+08:00"
+  #       type: "skill_health_snapshot"
+  #       source: "skills"
+  #   matchers_matched:
+  #     - "skill_not_invoked"
+  #   relevance_score: 0.55
+  #   reason: "Two skills serve identical purpose; consolidation opportunity"
+  #   discovered_at: "2026-05-15T04:00:05+08:00"
