@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.2 (2026-05-07)
+- Fix: `_traceback_re` false positive — markdown table docs trigger `has_error`
+  - Added 3-layer context guard (table row / backtick / prose keyword)
+  - Content-wide search preserved for cross-line `Traceback:\n/path/` matching
+  - 20/20 tests, 10 FP eliminated across 7d data, 0 regression
+- P-20260507-traceback-guard
+
 ## 1.4.1 (2026-05-04)
 - Initial public release
 - Portable paths via `_paths.py` (`$HERMES_HOME`)

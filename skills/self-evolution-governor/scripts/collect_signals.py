@@ -243,12 +243,34 @@ def collect_cron_signals(days: int = 1) -> list[dict]:
             )
             has_exit_code_error = bool(_exit_re.search(content))
 
-            # Layer 2 (ALWAYS): Python traceback — never a false positive
+            # Layer 2 (ALWAYS): Python traceback — Never false positive
+            # GUARD: content-wide search + line-by-line context check
             _traceback_re = re.compile(
                 r'Traceback\s*\(most recent call last\)|Traceback:\s*/',
                 re.IGNORECASE
             )
-            has_traceback = bool(_traceback_re.search(content))
+            _tb_match = _traceback_re.search(content)
+            has_traceback = False
+            if _tb_match:
+                # Extract the line containing the match
+                _tb_start = content.rfind('\n', 0, _tb_match.start()) + 1
+                _tb_end = content.find('\n', _tb_match.end())
+                _tb_line = content[_tb_start:_tb_end] if _tb_end >= 0 else content[_tb_start:]
+                _s = _tb_line.strip()
+                # Guard 1: markdown table rows
+                if _s.startswith('|') and _s.endswith('|'):
+                    pass  # skip
+                # Guard 2: backtick-quoted documentation
+                elif '`' in _tb_line and re.search(
+                        r'`.*Traceback.*`', _tb_line, re.I):
+                    pass  # skip
+                # Guard 3: prose/instruction documentation keywords
+                elif re.search(
+                        r'\b(?:use|example|like|such as|documentation|note|usage)\b.*Traceback',
+                        _tb_line, re.I):
+                    pass  # skip
+                else:
+                    has_traceback = True
 
             # Layer 3 (FALLBACK): regex context-aware error detection
             # Only activates when exit_code is 0 or not found AND no traceback.
