@@ -6,16 +6,6 @@ Designed to be run by cron daily (04:00) and event-triggered on ops-gate failure
 """
 from __future__ import annotations
 
-from _paths import (
-    STATE_DIR, OPS_GATE_DIR, EVOLUTION_DIR, SCRIPTS_DIR, SKILLS_DIR,
-    CRON_OUTPUT_DIR, SIGNALS_FILE, AGENDA_FILE, PROPOSAL_FILE,
-    JOURNAL_FILE, HERMES_CONFIG, HERMES_ENV, CRON_JOBS_FILE,
-    CURATOR_LOG_DIR, USAGE_FILE, ARCHIVE_DIR, BUNDLED_MANIFEST,
-    HUB_LOCK_DIR, HUB_LOCK_FILE, GATEWAY_LOG, CORE_GOVERNANCE_SKILLS,
-    LIFECYCLE_CACHE, HEALTH_CACHE, ABSENT_CACHE,
-    HERMES_HOME,
-)
-
 import json
 import os
 import re
@@ -31,6 +21,58 @@ except ImportError:
     yaml = None
 
 TZ = timezone(timedelta(hours=8))
+
+STATE_DIR = Path("/vol1/.hermes/state")
+OPS_GATE_DIR = STATE_DIR / "ops-gate"
+EVOLUTION_DIR = STATE_DIR / "evolution"
+SCRIPTS_DIR = Path("/vol1/.hermes/scripts")
+SKILLS_DIR = Path("/vol1/.hermes/skills")
+CRON_OUTPUT_DIR = Path("/vol1/.hermes/cron/output")
+
+# Real session data sources (replaces evolution_journal proxy)
+SESSION_DIR = Path(os.path.expanduser("~/.hermes/sessions"))
+SESSIONS_INDEX = SESSION_DIR / "sessions.json"
+
+# Phase O1: Official Hermes signal sources (read-only probes)
+CURATOR_LOG_DIR = Path("/vol1/.hermes/logs/curator")
+USAGE_FILE = SKILLS_DIR / ".usage.json"
+ARCHIVE_DIR = SKILLS_DIR / ".archive"
+BUNDLED_MANIFEST = SKILLS_DIR / ".bundled_manifest"
+HUB_LOCK_DIR = SKILLS_DIR / ".hub"
+HUB_LOCK_FILE = HUB_LOCK_DIR / "lock.json"
+
+# Gateway log for communication health monitoring
+GATEWAY_LOG = Path("/vol1/.hermes/logs/gateway.log")
+
+# Skills that must never be flagged for archive by self-evolution governance
+# These are core governance/infrastructure skills managed by the user
+CORE_GOVERNANCE_SKILLS = frozenset({
+    "self-evolution-governor",
+    "ops-gate-automation",
+    "memory-change-approval-gate",
+    "skills-platform-scoping",
+    "skill-scene-management",
+    "hermes-agent",
+    "systematic-debugging",
+    "subagent-driven-development",
+    "plan",
+    "writing-plans",
+})
+
+SIGNALS_FILE = EVOLUTION_DIR / "signals.jsonl"
+AGENDA_FILE = EVOLUTION_DIR / "self_agenda.yaml"
+PROPOSAL_FILE = EVOLUTION_DIR / "proposal_queue.yaml"
+JOURNAL_FILE = EVOLUTION_DIR / "evolution_journal.md"
+HERMES_CONFIG = Path("/vol1/.hermes/config.yaml")
+HERMES_ENV = Path("/vol1/.hermes/.env")
+CRON_JOBS_FILE = Path("/vol1/.hermes/cron/jobs.json")
+
+# ── V1.5: Signal delta-state tracking (Stage 2 denoising) ──
+# Cache files track last-known state per signal source.
+# Collectors emit signals ONLY on state transitions (delta).
+LIFECYCLE_CACHE = EVOLUTION_DIR / ".lifecycle_delta_cache.json"
+HEALTH_CACHE = EVOLUTION_DIR / ".skill_health_delta_cache.json"
+ABSENT_CACHE = EVOLUTION_DIR / ".source_absent_delta_cache.json"
 
 
 def _load_cache(cache_file: Path) -> dict:
@@ -95,8 +137,8 @@ def _build_signal_dedup_key(sig: dict) -> str:
         return (f"memory:{sig.get('target','?')}:"
                 f"{sig.get('ts','')}")
     elif sig_type == "session_metadata":
-        return (f"session:{sig.get('ts','')}:"
-                f"{sig.get('total_journal_entries',0)}")
+        return (f"session:{sig.get('ts','')}:{sig.get('total_sessions',0)}:"
+                f"{sig.get('active_sessions_24h',0)}")
     elif sig_type == "curator_run":
         return (f"curator:{sig.get('run_id','?')}:"
                 f"{sig.get('run_at','')}")
@@ -139,8 +181,11 @@ def _build_signal_dedup_key(sig: dict) -> str:
         return f"protected_skill_anomaly:{hash(json.dumps(sig.get('unprotected_skills',[]), sort_keys=True))}"
     elif sig_type == "recent_session_mention":
         return "recent_session_mention:" + str(hash(
-            json.dumps([(m["skill"], m["mention_count"]) for m in sig.get("top_mentions", [])],
-                       sort_keys=True)))
+            json.dumps([
+                (m["skill"], m["mention_count"]) for m in sig.get("top_mentions", [])
+            ] + [
+                (k["keyword"], k["count"]) for k in sig.get("top_keywords", [])
+            ], sort_keys=True)))
     elif sig_type == "gateway_health":
         return "gateway_health:" + str(hash(
             json.dumps(sig.get("hourly_alerts", []), sort_keys=True)))
@@ -375,7 +420,7 @@ def collect_config_signals(days: int = 1) -> list[dict]:
 def collect_memory_signals() -> list[dict]:
     """Check memory file sizes and estimate quality."""
     signals = []
-    hermes_dir = HERMES_HOME / "hermes-agent"
+    hermes_dir = Path("/vol1/.hermes/hermes-agent")
     memory_file = hermes_dir / "memory.json"
     user_file = hermes_dir / "user.json"
 
@@ -492,18 +537,95 @@ def collect_tool_signals() -> list[dict]:
 
 
 def collect_session_signals() -> list[dict]:
-    """Check evolution journal for session volume proxy."""
+    """Read sessions.json for real session metadata.
+
+    Outputs platform distribution, active session counts, and most recent
+    session info. Replaced evolution_journal proxy with real session index.
+    Privacy: only aggregate counts, no message content.
+    """
     signals = []
-    if JOURNAL_FILE.exists():
-        lines = JOURNAL_FILE.read_text().strip().split("\n")
-        # Count journal entries per day as proxy for session activity
-        entry_count = len([l for l in lines if l.startswith("## ")])
+    ts = now_iso()
+
+    if not SESSIONS_INDEX.exists():
         signals.append({
-            "ts": now_iso(),
-            "type": "session_metadata",
-            "source": "evolution-journal",
-            "total_journal_entries": entry_count,
+            "ts": ts,
+            "type": "source_absent",
+            "source": "sessions",
+            "source_path": str(SESSIONS_INDEX),
+            "reason": "sessions_json_not_found",
         })
+        return signals
+
+    try:
+        data = json.loads(SESSIONS_INDEX.read_text())
+    except (json.JSONDecodeError, Exception):
+        return signals
+
+    total = len(data)
+    now_dt = datetime.now(TZ)
+
+    platform_counts: dict[str, int] = {}
+    chat_type_counts: dict[str, int] = {}
+    active_24h = 0
+    active_7d = 0
+    most_recent = None
+
+    for sess in data.values():
+        platform = sess.get("platform", "unknown")
+        chat_type = sess.get("chat_type", "unknown")
+        platform_counts[platform] = platform_counts.get(platform, 0) + 1
+        chat_type_counts[chat_type] = chat_type_counts.get(chat_type, 0) + 1
+
+        updated_str = sess.get("updated_at")
+        if updated_str:
+            try:
+                updated_dt = datetime.fromisoformat(updated_str)
+                # Make timezone-aware: assume stored times are local TZ
+                if updated_dt.tzinfo is None:
+                    updated_dt = updated_dt.replace(tzinfo=TZ)
+                delta = now_dt - updated_dt
+                if delta.total_seconds() < 86400:
+                    active_24h += 1
+                if delta.total_seconds() < 604800:
+                    active_7d += 1
+
+                if most_recent is None or updated_dt > most_recent["_dt"]:
+                    most_recent = {
+                        "_dt": updated_dt,
+                        "platform": platform,
+                        "chat_type": chat_type,
+                        "display_name": sess.get("display_name", "?"),
+                        "updated_at": updated_str,
+                    }
+            except (ValueError, TypeError):
+                pass
+
+    signal = {
+        "ts": ts,
+        "type": "session_metadata",
+        "source": "sessions-json",
+        "total_sessions": total,
+        "active_sessions_24h": active_24h,
+        "active_sessions_7d": active_7d,
+        "platforms": [
+            {"platform": p, "count": c}
+            for p, c in sorted(platform_counts.items(), key=lambda x: -x[1])
+        ],
+        "chat_types": [
+            {"type": t, "count": c}
+            for t, c in sorted(chat_type_counts.items(), key=lambda x: -x[1])
+        ],
+        "signal_weight": 0.75,
+    }
+    if most_recent:
+        signal["most_recent_session"] = {
+            "platform": most_recent["platform"],
+            "chat_type": most_recent["chat_type"],
+            "display_name": most_recent["display_name"],
+            "updated_at": most_recent["updated_at"],
+        }
+
+    signals.append(signal)
     return signals
 
 
@@ -543,7 +665,7 @@ def collect_curator_signals() -> list[dict]:
     """
     Probe for Curator run reports. Read-only — does not trigger curator runs.
     Signal type: curator_run
-    Data source: $HERMES_HOME/logs/curator/<timestamp>/run.json
+    Data source: /vol1/.hermes/logs/curator/<timestamp>/run.json
     """
     signals = []
     ts = now_iso()
@@ -646,7 +768,7 @@ def collect_skill_usage_signals() -> list[dict]:
     Read .usage.json for skill usage telemetry.
     Read-only — does not modify usage data.
     Signal type: skill_usage_telemetry
-    Data source: $HERMES_HOME/skills/.usage.json
+    Data source: /vol1/.hermes/skills/.usage.json
     """
     signals = []
     ts = now_iso()
@@ -1085,61 +1207,200 @@ def collect_protected_skills_signals() -> list[dict]:
             "signal_weight": 0.95,
             "unprotected_skills": anomalies,
             "risk_level": "high",
-            "recommended_action": f"Run: chattr -R +i {SKILLS_DIR}/<category>/<skill_name>",
+            "recommended_action": "Run: chattr -R +i /vol1/.hermes/skills/<category>/<skill_name>",
         })
 
     return signals
 
 
-def collect_recent_session_mentions(days: int = 7) -> list[dict]:
-    """O2-lite: Scan evolution_journal.md for skill name mentions.
+# ── O2-lite: Real session mention scanner ────────────────────────────
 
-    Reads journal file, counts mentions of known skill names
-    over the last N days. Does NOT read signals.jsonl,
-    score_explanations/, or console docs/.
-    Delta-only via dedup key.
+# Common English stopwords for topic filtering
+_EN_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
+    "my", "your", "his", "its", "our", "their", "this", "that", "these",
+    "those", "in", "on", "at", "to", "for", "of", "and", "or", "not",
+    "no", "but", "if", "so", "as", "with", "about", "from", "by", "do",
+    "did", "does", "has", "have", "had", "will", "would", "can", "could",
+    "should", "may", "might", "just", "like", "also", "very", "really",
+    "too", "now", "then", "up", "out", "off", "over", "all", "any",
+    "each", "every", "some", "more", "most", "other", "such", "only",
+    "own", "same", "what", "which", "who", "where", "when", "why", "how",
+    "here", "there", "after", "before", "into", "than", "get", "got",
+    "make", "made", "need", "use", "used", "let", "look", "know", "see",
+    "say", "come", "take", "one", "two", "first", "last", "please",
+    "ok", "okay", "yes", "yeah", "sure", "right", "well", "way",
+})
+
+
+# Common Chinese noise tokens (particles, common fragments)
+_CN_NOISE = frozenset({
+    "一个", "什么", "时候", "你说", "可以", "没有", "就是", "不是",
+    "这个", "那个", "知道", "看到", "觉得", "告诉", "因为", "所以",
+    "然后", "虽然", "如果", "但是", "而且", "或者", "还是", "已经",
+    "一直", "之后", "之前", "现在", "今天", "昨天", "明天", "哈哈",
+    "嗯嗯", "好的", "是的", "是吧", "的话", "也是", "还有", "有点",
+    "一些", "哪些", "怎么", "这样", "那样", "这里", "那里", "一边",
+    "一起", "做什", "你说", "我说", "他说", "她说", "他们说",
+    "过来", "上去", "下来", "进去", "出来", "回去", "看去",
+    "看到", "听到", "想到", "进来", "用来",
+    # Common noise fragments from 2-char sliding window
+    "了一", "的时", "的窗", "你的", "我的", "他的", "她的", "它的", "们的",
+    "一下", "可以", "没有", "就是", "一个", "什么", "这个", "那个", "不是",
+    "这么", "那么", "之后", "之前", "哈哈", "嗯嗯", "是的", "好吧",
+    "吧", "吗", "哦", "嗯", "哈", "嘿",
+})
+
+
+def _tokenize_message(text: str) -> list[str]:
+    """Split a user message into meaningful tokens for keyword counting.
+
+    Handles English words (whitespace-separated) and Chinese text via
+    2-4 char substring extraction. Filters stopwords and short tokens.
+    Returns lowercase tokens only. Privacy: no original text retained.
+    """
+    tokens = []
+
+    # Chinese text: extract 2-char substrings only (most Chinese words are 2 chars)
+    chinese_chunk = ""
+    for ch in text:
+        if '\u4e00' <= ch <= '\u9fff':
+            chinese_chunk += ch
+        else:
+            if len(chinese_chunk) >= 2:
+                for start in range(len(chinese_chunk) - 1):
+                    token = chinese_chunk[start:start+2]
+                    # Filter: noise list + tokens starting with 的/了 (always noise)
+                    if token not in _CN_NOISE and token[0] not in ("的", "了"):
+                        tokens.append(token)
+            chinese_chunk = ""
+    if len(chinese_chunk) >= 2:
+        for start in range(len(chinese_chunk) - 1):
+            token = chinese_chunk[start:start+2]
+            if token not in _CN_NOISE and token[0] not in ("的", "了"):
+                tokens.append(token)
+
+    # English words: whitespace split + clean
+    for word in text.split():
+        cleaned = word.strip(".,!?;:()[]{}'\"/\\<>@#$%^&*+=|~`").lower()
+        if len(cleaned) >= 3 and cleaned not in _EN_STOPWORDS and cleaned.isalpha():
+            tokens.append(cleaned)
+
+    return tokens
+
+
+def collect_recent_session_mentions(days: int = 3) -> list[dict]:
+    """Scan real session JSONL files for skill mentions and topic keywords.
+
+    Reads user messages from ~/.hermes/sessions/*.jsonl (last N days).
+    Counts skill name frequency and keyword frequency from user messages.
+    Privacy: only aggregate stats in signals.jsonl, never original text.
+    Replaced evolution_journal.md scan with real session data.
     """
     signals = []
     ts = now_iso()
 
-    if not JOURNAL_FILE.exists():
+    if not SESSION_DIR.exists():
         return signals
 
-    journal_text = JOURNAL_FILE.read_text(encoding="utf-8")
-
-    # Build a set of skill names to scan for
+    # Build skill name set (lowercase for case-insensitive matching)
     skill_names: set[str] = set()
     if SKILLS_DIR.exists():
         for cat_dir in SKILLS_DIR.iterdir():
             if not cat_dir.is_dir() or cat_dir.name.startswith("."):
                 continue
             for skill_dir in cat_dir.iterdir():
-                skill_names.add(skill_dir.name)
+                skill_names.add(skill_dir.name.lower())
 
-    # Count mentions per skill in journal text
-    mention_counts: dict[str, int] = {}
-    for name in skill_names:
-        count = journal_text.count(name)
-        if count > 0:
-            mention_counts[name] = count
+    # Collect user messages from recent JSONL files
+    now_dt = datetime.now(TZ)
+    cutoff = now_dt - timedelta(days=days)
 
-    # Top 20 most mentioned
-    top_skills = sorted(mention_counts.items(), key=lambda x: -x[1])[:20]
+    skill_mention_counts: dict[str, int] = {}
+    keyword_counts: dict[str, int] = {}
+    total_user_msgs = 0
+    files_scanned = 0
 
-    if top_skills:
-        signals.append({
+    jsonl_files = sorted(SESSION_DIR.glob("*.jsonl"), reverse=True)
+    for fpath in jsonl_files:
+        try:
+            mtime = datetime.fromtimestamp(fpath.stat().st_mtime, tz=TZ)
+            if mtime < cutoff:
+                break
+        except OSError:
+            continue
+
+        files_scanned += 1
+        try:
+            raw_text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        for line in raw_text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if entry.get("role") != "user":
+                continue
+
+            content = entry.get("content", "")
+            if isinstance(content, str):
+                msg_text = content
+            elif isinstance(content, list):
+                texts = [p.get("text", "") for p in content if isinstance(p, dict)]
+                msg_text = " ".join(texts)
+            else:
+                continue
+
+            if not msg_text:
+                continue
+
+            total_user_msgs += 1
+            msg_lower = msg_text.lower()
+
+            # Count skill name mentions
+            for skill in skill_names:
+                if skill in msg_lower:
+                    skill_mention_counts[skill] = skill_mention_counts.get(skill, 0) + 1
+
+            # Count topic keywords (tokenized, never stores raw text)
+            for token in _tokenize_message(msg_text):
+                if token not in skill_names:
+                    keyword_counts[token] = keyword_counts.get(token, 0) + 1
+
+    # Top 20 mentioned skills
+    top_skills = sorted(skill_mention_counts.items(), key=lambda x: -x[1])[:20]
+
+    # Top 15 topic keywords
+    top_keywords = sorted(keyword_counts.items(), key=lambda x: -x[1])[:15]
+
+    if total_user_msgs > 0:
+        signal = {
             "ts": ts,
             "type": "recent_session_mention",
-            "source": "evolution-journal",
-            "journal_size_bytes": len(journal_text),
-            "total_unique_skills_mentioned": len(mention_counts),
-            "signal_weight": 0.60,
+            "source": "sessions-jsonl",
+            "total_user_messages": total_user_msgs,
+            "files_scanned": files_scanned,
             "scan_days": days,
+            "total_unique_skills_mentioned": len(skill_mention_counts),
+            "total_unique_keywords": len(keyword_counts),
+            "signal_weight": 0.70,
             "top_mentions": [
                 {"skill": name, "mention_count": count}
                 for name, count in top_skills
             ],
-        })
+            "top_keywords": [
+                {"keyword": kw, "count": c}
+                for kw, c in top_keywords
+            ],
+        }
+        signals.append(signal)
 
     return signals
 

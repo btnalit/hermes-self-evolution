@@ -23,11 +23,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 TZ = timezone(timedelta(hours=8))
-
-from _paths import (
-    EVOLUTION_DIR, AGENDA_FILE, SIGNALS_FILE,
-    CANDIDATES_FILE, JOURNAL_FILE, PROPOSAL_FILE, SCORE_EXPL_DIR,
-)
+STATE_DIR = Path("/vol1/.hermes/state/evolution")
+AGENDA_FILE = STATE_DIR / "self_agenda.yaml"
+SIGNALS_FILE = STATE_DIR / "signals.jsonl"
+CANDIDATES_FILE = STATE_DIR / "agenda_candidates.yaml"
+JOURNAL_FILE = STATE_DIR / "evolution_journal.md"
+SCORE_EXPL_DIR = STATE_DIR / "score_explanations"
 
 # ── Hardcoded type→action mapping ──
 MATURITY_ACTION_MAP = {
@@ -120,7 +121,7 @@ def load_signals(days: int = 3) -> list[dict]:
 
 
 def load_proposals() -> list[dict]:
-    data = load_yaml(PROPOSAL_FILE)
+    data = load_yaml(STATE_DIR / "proposal_queue.yaml")
     return data.get("proposals", [])
 
 
@@ -202,11 +203,11 @@ def _is_qualified_evidence(item: dict, ev: dict) -> tuple[bool, str, float]:
     contribution = round(weight * relevance, 3)
 
     strong_sources = {
-        "strategic_positioning": {"verified_proposal", "config_change"},
+        "strategic_positioning": {"session_metadata", "recent_session_mention", "verified_proposal", "config_change"},
         "automation_opportunity": {"repeated_manual_work", "user_correction",
                                     "opportunity_for_automation"},
         "quality_improvement": {"ops_gate_result", "proposal_feedback", "verified_proposal"},
-        "cleanup_candidate": {"config_change"},
+        "cleanup_candidate": {"recent_session_mention", "config_change"},
         "risk_watch": {"ops_gate_result", "cron_result", "tool_reliability"},
     }
 
@@ -238,19 +239,19 @@ def _compute_relevance(item_type: str, source: str, summary: str) -> float:
 
     if item_type == "cleanup_candidate":
         if source == "self_agenda_init":
-            return 0.50  # Agenda creation is relevant context
+            return 0.50
         if source == "skill_health":
-            # "18 days unused" is WEAK evidence — only mildly relevant
-            # Check if summary mentions actual idleness indicators
             idle_indicators = ["last_used", "no_recent_mention", "no_dependency",
                                 "disabled", "stale"]
             if any(kw in sl for kw in idle_indicators):
                 return 0.60
-            return 0.20  # Just age_days info — weak
+            return 0.20
         if source == "config_change":
             if "archive" in sl or "cleanup" in sl:
                 return 0.70
             return 0.30
+        if source == "recent_session_mention":
+            return 0.65  # real skill usage = direct evidence of what's unused
         return 0.10
 
     elif item_type == "strategic_positioning":
@@ -260,6 +261,10 @@ def _compute_relevance(item_type: str, source: str, summary: str) -> float:
             if any(kw in sl for kw in ("skill", "proposal", "agenda", "governance")):
                 return 0.60
             return 0.30
+        if source == "session_metadata":
+            return 0.65  # platform/activity distribution = direct user context
+        if source == "recent_session_mention":
+            return 0.70  # real conversation topics = direct user intent signal
         return 0.10
 
     elif item_type == "quality_improvement":
@@ -1128,6 +1133,7 @@ def main():
     agenda = load_yaml(AGENDA_FILE)
     items = agenda.get("agenda_items", [])
     signals = load_signals(days=3)
+    signals.reverse()  # Newest first: ensures recent session signals match before old config_change
     proposals = load_proposals()
 
     print(f"Agenda Maturation Engine — V1.4.1c")
