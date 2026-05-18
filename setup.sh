@@ -50,17 +50,32 @@ if [ -x "$(command -v hermes)" ]; then
     if $AUTO_YES; then REPLY="y"; else read -rp "   是否安装 Hermes 插件? [Y/n] " REPLY; fi
     REPLY="${REPLY:-y}"
     if [[ "$REPLY" =~ ^[Yy] ]]; then
-        # 直接用复制安装，避免 hermes plugins install 的 Git URL 限制
+        # 直接用复制安装 + config.yaml 注册，避免 hermes plugins install 的 Git URL 限制
         mkdir -p "$HERMES_HOME/plugins"
-        rm -rf "$PLUGIN_DST"
-        cp -r "$SOURCE_DIR/plugin/hermes-self-evolution" "$PLUGIN_DST"
-        echo "   ✅ 插件已复制到 $PLUGIN_DST"
-        echo "   ▶ 用以下命令激活:"
-        echo "     hermes plugins install $PLUGIN_DST --enable"
-        # 尝试激活
-        hermes plugins install "$PLUGIN_DST" --enable 2>/dev/null && \
-            echo "   ✅ 插件激活成功" || \
-            echo "   ⚠️  自动激活失败，请手动运行上面命令"
+        PLUGIN_SRC="$SOURCE_DIR/plugin/hermes-self-evolution"
+        if [ -d "$PLUGIN_DST" ]; then
+            echo "   ⏭️  插件目录已存在，跳过复制"
+        else
+            cp -r "$PLUGIN_SRC" "$PLUGIN_DST"
+            echo "   ✅ 插件已复制到 $PLUGIN_DST"
+        fi
+        # 通过 config.yaml 注册激活
+        if grep -q "hermes-self-evolution" "$HERMES_HOME/config.yaml" 2>/dev/null; then
+            echo "   ⏭️  插件已在 config.yaml 中注册"
+        else
+            python3 << 'PYFIX' 2>&1 && echo "   ✅ 插件已注册到 config.yaml，重启 gateway 后生效"
+import yaml, os
+path = os.environ["HERMES_HOME"] + "/config.yaml"
+with open(path) as f:
+    cfg = yaml.safe_load(f)
+plugins = cfg.setdefault("plugins", {})
+enabled = plugins.setdefault("enabled", [])
+if "hermes-self-evolution" not in enabled:
+    enabled.append("hermes-self-evolution")
+with open(path, "w") as f:
+    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+PYFIX
+        fi
     else
         echo "   ⏭️  跳过插件安装"
     fi
