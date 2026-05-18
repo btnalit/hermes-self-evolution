@@ -13,17 +13,24 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from _paths import (
-    EVOLUTION_DIR, SIGNALS_FILE, AGENDA_FILE,
-    PROPOSAL_FILE, JOURNAL_FILE, FOCUS_FILE, DIGEST_FILE,
-)
+import yaml
 
 TZ = timezone(timedelta(hours=8))
+
+EVOLUTION_DIR = Path("/vol1/.hermes/state/evolution")
+SIGNALS_FILE = EVOLUTION_DIR / "signals.jsonl"
+AGENDA_FILE = EVOLUTION_DIR / "self_agenda.yaml"
+PROPOSAL_FILE = EVOLUTION_DIR / "proposal_queue.yaml"
+JOURNAL_FILE = EVOLUTION_DIR / "evolution_journal.md"
+FOCUS_FILE = EVOLUTION_DIR / "HERMES_FOCUS.md"
+DIGEST_FILE = EVOLUTION_DIR / "runtime_digest.md"
 
 
 def now_iso() -> str:
@@ -42,32 +49,14 @@ def load_proposals() -> list[dict]:
     if not content.strip() or content.strip() == "{}":
         return []
     try:
-        # Simple YAML parser for our known structure
-        import re
-        proposals = []
-        current = {}
-        in_proposal = False
-        
-        for line in content.split("\n"):
-            if line.strip().startswith("- id:"):
-                if current:
-                    proposals.append(current)
-                current = {"id": line.split(":", 1)[1].strip().strip("\"'")}
-                in_proposal = True
-            elif in_proposal and line.strip():
-                if ":" in line:
-                    key, _, val = line.partition(":")
-                    key = key.strip()
-                    val = val.strip().strip("\"'")
-                    if val.startswith("{") or val.startswith("["):
-                        try:
-                            val = json.loads(val)
-                        except json.JSONDecodeError:
-                            pass
-                    current[key] = val
-        if current:
-            proposals.append(current)
-        return proposals
+        data = yaml.safe_load(content) or {}
+        if isinstance(data, dict):
+            proposals = data.get("proposals") or []
+        elif isinstance(data, list):
+            proposals = data
+        else:
+            proposals = []
+        return [item for item in proposals if isinstance(item, dict)]
     except Exception:
         return []
 
@@ -160,12 +149,10 @@ def build_digest(
     lines.append(f"Valid until: {(now + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M')}")
     lines.append("")
     
-    # Section 1: Current Focus
-    lines.append("## Current Focus")
-    lines.append("")
+    # Section 1: Current Focus — only emitted when there are actual focus items
     if focus_content:
-        # Extract the numbered items
         in_focus = False
+        has_focus = False
         for line in focus_content.split("\n"):
             if line.startswith("## Current Operating Focus"):
                 in_focus = True
@@ -173,9 +160,14 @@ def build_digest(
             elif line.startswith("## ") and "Current" not in line:
                 in_focus = False
             elif in_focus and line.strip().startswith(("1.", "2.", "3.")):
+                if not has_focus:
+                    lines.append("## Current Focus")
+                    lines.append("")
+                    has_focus = True
                 lines.append(line.strip())
-    
-    lines.append("")
+        
+        if has_focus:
+            lines.append("")
     
     # Section 2: Pending Proposals (high-value)
     if pending:
@@ -221,15 +213,17 @@ def build_focus(
     signals: list[dict],
     errors: list[dict],
     dry_run: bool = False,
-) -> str:
-    """Build or update HERMES_FOCUS.md content.
+) -> tuple[str, str]:
+    """Build or update HERMES_FOCUS.md content from actual signal data.
     
-    Only writes if focus has meaningfully changed (to avoid unnecessary diffs).
+    Focus items are derived entirely from signal data — errors, user corrections,
+    project shifts, and gateway issues. No hardcoded defaults.
+    If nothing is wrong, the focus section states that explicitly.
+    Only writes if content has changed meaningfully.
     """
     now = datetime.now(TZ)
     valid_until = now + timedelta(days=7)
     
-    # Determine focus from signals and proposals
     lines = []
     lines.append("# HERMES_FOCUS.md")
     lines.append("")
@@ -240,35 +234,58 @@ def build_focus(
     lines.append("## Current Operating Focus")
     lines.append("")
     
-    # Count error types
+    # Derive focus items from actual signal data — no hardcoded defaults
+    focus_items = []
+    
+    # 1. Error-driven focus (unconditional — real problems)
     cron_errors = [e for e in errors if e.get("type") == "cron_result"]
     ops_errors = [e for e in errors if e.get("type") == "ops_gate_result"]
-    
-    focus_items = [
-        ("Close the self-evolution feedback loop", 
-         "Recent proposals need consumption pipeline; runtime_digest is now active."),
-    ]
+    llm_wiki_errors = [e for e in errors if "wiki" in str(e).lower()]
     
     if cron_errors:
         focus_items.append(
             ("Stabilize cron automation",
-             f"{len(cron_errors)} cron failures in last 24h. Improve reliability."))
+             f"{len(cron_errors)} cron failures in last 24h"))
     
     if ops_errors:
         focus_items.append(
             ("Harden ops-gate task execution",
-             f"{len(ops_errors)} ops-gate task failures. Improve precheck/verify."))
+             f"{len(ops_errors)} ops-gate task failures"))
     
-    # Check for LLM-Wiki related errors
-    llm_wiki_errors = [e for e in errors if "wiki" in str(e).lower()]
     if llm_wiki_errors:
         focus_items.append(
             ("Stabilize LLM-Wiki automation",
-             f"{len(llm_wiki_errors)} LLM-Wiki related issues. Restart/verify needs hardening."))
+             f"{len(llm_wiki_errors)} LLM-Wiki related issues"))
     
-    for i, (title, reason) in enumerate(focus_items[:3], 1):
-        lines.append(f"{i}. **{title}**")
-        lines.append(f"   - Reason: {reason}")
+    # 2. Signal-driven focus (user corrections, gateway issues, project shifts)
+    corrections = [s for s in signals if s.get("type") == "user_correction"]
+    gateway_issues = [s for s in signals if s.get("type") in ("gateway_instability", "platform_offline")]
+    project_shifts = [s for s in signals if s.get("type") == "project_importance_change"]
+    
+    if corrections:
+        focus_items.append(
+            ("User corrections detected",
+             f"{len(corrections)} corrections in last 24h"))
+    
+    if gateway_issues:
+        focus_items.append(
+            ("Gateway stability",
+             f"{len(gateway_issues)} gateway/connection issues"))
+    
+    if project_shifts and not focus_items:
+        latest = max(project_shifts, key=lambda s: s.get("ts", ""))
+        project_name = latest.get("summary", "Unknown")
+        focus_items.append(
+            ("Project focus shift",
+             f"Activity shift: {project_name}"))
+    
+    if focus_items:
+        for i, (title, reason) in enumerate(focus_items[:3], 1):
+            lines.append(f"{i}. **{title}**")
+            lines.append(f"   - Reason: {reason}")
+            lines.append("")
+    else:
+        lines.append("_None — no errors, corrections, or project shifts detected._")
         lines.append("")
     
     lines.append("## Current Non-Goals")
@@ -293,13 +310,22 @@ def build_focus(
             existing = FOCUS_FILE.read_text()
         if existing.strip() != focus.strip():
             FOCUS_FILE.write_text(focus)
-            return "UPDATED"
+            return "UPDATED", focus
     
-    return "UNCHANGED"
+    return "UNCHANGED", focus
 
 
 def main():
-    dry_run = "--dry-run" in sys.argv
+    parser = argparse.ArgumentParser(
+        description="Build the self-evolution runtime digest and focus file."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview digest/focus output without writing files.",
+    )
+    args = parser.parse_args()
+    dry_run = args.dry_run
     
     proposals = load_proposals()
     signals = get_recent_signals(hours=24)
@@ -307,16 +333,11 @@ def main():
     pending, approved = get_focus_proposals(proposals)
     errors = get_recent_errors(signals, hours=24)
     
-    # Load existing focus
-    focus_content = ""
-    if FOCUS_FILE.exists():
-        focus_content = FOCUS_FILE.read_text()
-    
-    # Build digest
+    # Build/update focus first so runtime_digest reflects the same run's focus.
+    focus_status, focus_content = build_focus(proposals, signals, errors, dry_run)
+
+    # Build digest from the freshly computed focus content.
     digest = build_digest(proposals, signals, focus_content, pending, approved, errors, dry_run)
-    
-    # Build/update focus
-    focus_status = build_focus(proposals, signals, errors, dry_run)
     
     result = {
         "ts": now_iso(),

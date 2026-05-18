@@ -57,3 +57,16 @@
 - Manual proposal tracking
 - Basic journaling
 - Hermes Agent integration proof
+
+## 1.5.0 (2026-05-18)
+- **Sync with live system** — 全面同步运行中系统的实际代码
+- **新增 7 个脚本**：agenda_candidate_closure, agenda_review_action, new_agenda_apply,
+  new_agenda_preview, unmatched_cluster_ledger, unmatched_signal_review, weekly_strategy_facts
+- **Pipeline 升级**：7 步 → 12 步（含 unmatched review + new agenda apply）
+- **移除 `_paths.py`**：live 系统已全面改用硬编码路径
+- **Collect signals 增强**：+Sannai cron 采集、+delta cache、+argparse 支持
+- **Speak gate 增强**：CW-018 secondary gate 改造、agenda quota 独立管理
+- **Agenda maturation**：V1.4.1c + CW-004 信号分类硬化过滤器
+- **Build runtime digest**：已删除硬编码的"Close self-evolution loop"默认 focus
+- **新增 demo 示例**：agenda_speak_decisions.yaml.example, HERMES_FOCUS.md.example
+- **SKILL.md 同步**：中文描述、完整 13+ 信号源、硬编码 focus bug 教训文档

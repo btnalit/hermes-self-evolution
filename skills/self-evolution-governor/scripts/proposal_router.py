@@ -27,10 +27,12 @@ import re
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
-
-from _paths import EVOLUTION_DIR, PROPOSAL_FILE
+from pathlib import Path
 
 TZ = timezone(timedelta(hours=8))
+
+EVOLUTION_DIR = Path("/vol1/.hermes/state/evolution")
+PROPOSAL_FILE = EVOLUTION_DIR / "proposal_queue.yaml"
 
 
 def now_iso() -> str:
@@ -427,6 +429,10 @@ def show_cleanup_scope() -> dict:
 
 
 def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__.strip())
+        return
+
     if "--verify-implemented" in sys.argv:
         dry_run = "--dry-run" in sys.argv
         result = verify_implemented(dry_run=dry_run)

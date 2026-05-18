@@ -11,14 +11,6 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-from _paths import (
-    QUOTA_FILE,
-    AGENDA_QUOTA_FILE,
-    CANDIDATES_FILE as AGENDA_CANDIDATES_FILE,
-    AGENDA_DECISIONS_FILE,
-    JOURNAL_FILE,
-)
-
 TZ = timezone(timedelta(hours=8))
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -41,6 +33,12 @@ DAILY_DIGEST_THRESHOLD = 0.40
 
 DAILY_SUGGESTION_LIMIT = 3
 DAILY_STRATEGIC_LIMIT = 1
+
+QUOTA_FILE = "/vol1/.hermes/state/evolution/speak_quota.json"
+AGENDA_QUOTA_FILE = "/vol1/.hermes/state/evolution/agenda_speak_quota.json"
+AGENDA_CANDIDATES_FILE = "/vol1/.hermes/state/evolution/agenda_candidates.yaml"
+AGENDA_DECISIONS_FILE = "/vol1/.hermes/state/evolution/agenda_speak_decisions.yaml"
+JOURNAL_FILE = "/vol1/.hermes/state/evolution/evolution_journal.md"
 
 # Default agenda_speak mode (override via AGENDA_SPEAK_MODE env var)
 DEFAULT_AGENDA_SPEAK_MODE = "controlled"
@@ -65,6 +63,11 @@ TYPE_MIN_EVIDENCE_STRENGTH = {
 
 AGENDA_DAILY_SURFACE_LIMIT = 1
 AGENDA_COOLDOWN_DAYS = 7
+ACTIVE_CANDIDATE_STATUSES = {
+    "candidate_ready",
+    "quality_proposal_ready",
+    "new_agenda_preview_ready",
+}
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -106,39 +109,27 @@ def append_journal(entry: str):
 
 
 def load_yaml_simple(path: str) -> dict | None:
-    """Minimal YAML loader for agenda_candidates.yaml."""
+    """Load agenda_candidates.yaml with a real YAML parser."""
     if not os.path.exists(path):
         return None
-    with open(path) as f:
-        content = f.read()
+    try:
+        import yaml
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as exc:
+        return {"candidates": [], "_load_error": str(exc)}
 
-    result = {}
-    in_candidates = False
-    current_candidate = None
+    if not isinstance(data, dict):
+        return {"candidates": []}
 
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if stripped == "candidates:":
-            in_candidates = True
-            continue
-        if in_candidates:
-            if stripped == "[]":
-                result["candidates"] = []
-                break
-            if stripped.startswith("-"):
-                current_candidate = {}
-                if "candidates" not in result:
-                    result["candidates"] = []
-                result["candidates"].append(current_candidate)
-                rest = stripped[1:].strip()
-                if ":" in rest:
-                    key, val = rest.split(":", 1)
-                    current_candidate[key.strip()] = _parse_yaml_val(val.strip())
-            elif current_candidate is not None and ":" in stripped:
-                key, val = stripped.split(":", 1)
-                current_candidate[key.strip()] = _parse_yaml_val(val.strip().strip("'\""))
-
-    return result
+    candidates = data.get("candidates")
+    if candidates is None:
+        return data
+    if not isinstance(candidates, list):
+        data["candidates"] = []
+    else:
+        data["candidates"] = [c for c in candidates if isinstance(c, dict)]
+    return data
 
 
 def _parse_yaml_val(val: str):
@@ -458,6 +449,22 @@ def process_agenda_candidates() -> dict:
         "total_candidates": len(candidates),
         "surfaced": surfaced_count,
         "suppressed": suppressed_count,
+        "candidate_kind_counts": _candidate_kind_counts(decisions),
+        "surfaced_candidates": _decision_summaries(
+            [item for item in decisions if item.get("decision") == "surface"]
+        ),
+        "ready_not_surfaced_candidates": _decision_summaries(
+            [
+                item
+                for item in decisions
+                if item.get("decision") != "surface"
+                and item.get("candidate_status") in (
+                    "candidate_ready",
+                    "quality_proposal_ready",
+                    "new_agenda_preview_ready",
+                )
+            ]
+        ),
     }
 
     _write_agenda_decisions(result)
@@ -483,22 +490,64 @@ def _evaluate_single_candidate(candidate: dict, quota: dict, mode: str) -> dict:
     Evaluate one agenda candidate through the secondary gate.
     Returns a full decision dict including reason even when suppressed.
     """
-    candidate_id = candidate.get("id", candidate.get("candidate_id", "unknown"))
+    candidate_id = candidate.get("candidate_id") or candidate.get("id") or candidate.get("agenda_id") or "unknown"
     title = candidate.get("title", "")
     ag_type = candidate.get("type", "")
+    candidate_kind = candidate.get("candidate_kind") or "agenda_candidate"
+    candidate_status = candidate.get("status") or ""
+    candidate_action = candidate.get("action") or ""
     maturity_score = candidate.get("maturity_score", 0)
     evidence_strength = candidate.get("evidence_strength", 0)
     actionable_qualified_count = candidate.get("actionable_qualified_count", 0)
 
-    mapped_action = AGENDA_TYPE_ACTION_MAP.get(ag_type, "digest_only")
-    reason_parts = []
-
-    # ── risk_watch: bypass agenda channel ──
-    if ag_type == "risk_watch":
+    if candidate_status not in ACTIVE_CANDIDATE_STATUSES:
         return {
             "candidate_id": candidate_id,
             "title": title,
             "type": ag_type,
+            "candidate_kind": candidate_kind,
+            "candidate_status": candidate_status,
+            "candidate_action": candidate_action,
+            "proposal_queue_write": bool(candidate.get("proposal_queue_write", False)),
+            "decision": "ignored",
+            "reason": f"inactive candidate status: {candidate_status}",
+            "mapped_action": "none (inactive)",
+            "secondary_gate": {
+                "actionable_qualified_count": actionable_qualified_count,
+                "actionable_qualified_count_pass": False,
+                "evidence_strength": evidence_strength,
+                "min_evidence_strength": TYPE_MIN_EVIDENCE_STRENGTH.get(ag_type, 0.25),
+                "evidence_strength_pass": False,
+                "cooldown_passed": True,
+                "cooldown_days_remaining": 0,
+                "quota_available": True,
+                "is_risk_watch": ag_type == "risk_watch",
+                "maturity_score": maturity_score,
+            },
+            "message_preview": None,
+            "quota": {"would_consume": False, "consumed": False},
+        }
+
+    mapped_action = AGENDA_TYPE_ACTION_MAP.get(ag_type, "digest_only")
+    is_quality_proposal = (
+        candidate.get("status") == "quality_proposal_ready"
+        or candidate.get("action") == "generate_quality_proposal"
+    )
+    if is_quality_proposal:
+        mapped_action = "quality_proposal_preview"
+    if candidate_kind == "new_agenda" or candidate.get("status") == "new_agenda_preview_ready":
+        mapped_action = "new_agenda_preview"
+    reason_parts = []
+
+    # ── risk_watch: bypass agenda channel ──
+    if ag_type == "risk_watch" and not is_quality_proposal:
+        return {
+            "candidate_id": candidate_id,
+            "title": title,
+            "type": ag_type,
+            "candidate_kind": candidate_kind,
+            "candidate_status": candidate_status,
+            "candidate_action": candidate_action,
             "decision": "bypass",
             "reason": "risk_watch: bypass_agenda_channel — routed to direct risk alert path",
             "mapped_action": "bypass_agenda_channel",
@@ -583,6 +632,10 @@ def _evaluate_single_candidate(candidate: dict, quota: dict, mode: str) -> dict:
         "candidate_id": candidate_id,
         "title": title,
         "type": ag_type,
+        "candidate_kind": candidate_kind,
+        "candidate_status": candidate_status,
+        "candidate_action": candidate_action,
+        "proposal_queue_write": bool(candidate.get("proposal_queue_write", False)),
         "decision": "surface" if is_surface else "suppressed",
         "reason": reason,
         "mapped_action": mapped_action if is_surface else "none (suppressed)",
@@ -593,6 +646,32 @@ def _evaluate_single_candidate(candidate: dict, quota: dict, mode: str) -> dict:
             "consumed": is_surface and mode in ("controlled", "active"),
         },
     }
+
+
+def _decision_summaries(decisions: list[dict]) -> list[dict]:
+    result = []
+    for item in decisions:
+        result.append(
+            {
+                "candidate_id": item.get("candidate_id", ""),
+                "title": item.get("title", ""),
+                "candidate_kind": item.get("candidate_kind", ""),
+                "candidate_status": item.get("candidate_status", ""),
+                "candidate_action": item.get("candidate_action", ""),
+                "mapped_action": item.get("mapped_action", ""),
+                "decision": item.get("decision", ""),
+                "reason": item.get("reason", ""),
+            }
+        )
+    return result
+
+
+def _candidate_kind_counts(decisions: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in decisions:
+        key = str(item.get("candidate_kind") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _consume_agenda_quota(quota: dict, candidate_id: str):
@@ -634,6 +713,25 @@ def _generate_message_preview(candidate: dict, mapped_action: str) -> str | None
             f"• 证据：{evidence_count} 条信号\n"
             f"• 建议：考虑将此方向转化为具体改进提案"
         )
+    elif mapped_action == "quality_proposal_preview":
+        return (
+            f"[quality_proposal_preview] Monitoring trend is ready for owner approval:\n"
+            f"• Agenda: {title}\n"
+            f"• Question: {question}\n"
+            f"• Evidence: {evidence_count} signals\n"
+            f"• Recommendation: approve or reject drafting a concrete quality proposal\n"
+            f"• Proposal queue write: no automatic write before owner approval"
+        )
+    elif mapped_action == "new_agenda_preview":
+        why_not_existing = candidate.get("why_not_existing_agenda", "")
+        return (
+            f"[new_agenda_preview] 新议题候选：\n"
+            f"• 议题：{title}\n"
+            f"• 问题：{question}\n"
+            f"• 证据：{evidence_count} 条安全引用信号\n"
+            f"• 为什么不是现有议题：{why_not_existing}\n"
+            f"• 建议：进入观察/新增议题预览；这不是执行，也不会自动 approved"
+        )
     return f"[{mapped_action}] agenda '{title}' — {question}"
 
 
@@ -658,6 +756,9 @@ def _write_agenda_decisions(data: dict):
             lines.append(f"  - candidate_id: '{d['candidate_id']}'")
             lines.append(f"    title: '{d['title']}'")
             lines.append(f"    type: '{d['type']}'")
+            lines.append(f"    candidate_kind: '{d.get('candidate_kind', '')}'")
+            lines.append(f"    candidate_status: '{d.get('candidate_status', '')}'")
+            lines.append(f"    candidate_action: '{d.get('candidate_action', '')}'")
             lines.append(f"    decision: {d['decision']}")
             lines.append(f"    reason: '{d['reason']}'")
             lines.append(f"    mapped_action: '{d['mapped_action']}'")
@@ -672,7 +773,7 @@ def _write_agenda_decisions(data: dict):
             lines.append(f"      cooldown_days_remaining: {sg.get('cooldown_days_remaining', 0)}")
             lines.append(f"      quota_available: {str(sg.get('quota_available', True)).lower()}")
             lines.append(f"      is_risk_watch: {str(sg.get('is_risk_watch', False)).lower()}")
-            lines.append(f"    message_preview: {json.dumps(d.get('message_preview')) if d.get('message_preview') else 'null'}")
+            lines.append(f"    message_preview: {json.dumps(d.get('message_preview'), ensure_ascii=False) if d.get('message_preview') else 'null'}")
 
     lines.append("")
     lines.append("summary:")
@@ -680,6 +781,24 @@ def _write_agenda_decisions(data: dict):
     lines.append(f"  total_candidates: {s.get('total_candidates', 0)}")
     lines.append(f"  surfaced: {s.get('surfaced', 0)}")
     lines.append(f"  suppressed: {s.get('suppressed', 0)}")
+    lines.append("  candidate_kind_counts:")
+    for key, value in (s.get("candidate_kind_counts") or {}).items():
+        lines.append(f"    {key}: {value}")
+    for field in ("surfaced_candidates", "ready_not_surfaced_candidates"):
+        lines.append(f"  {field}:")
+        items = s.get(field) or []
+        if not items:
+            lines.append("    []")
+            continue
+        for item in items:
+            lines.append(f"    - candidate_id: '{item.get('candidate_id', '')}'")
+            lines.append(f"      title: '{item.get('title', '')}'")
+            lines.append(f"      candidate_kind: '{item.get('candidate_kind', '')}'")
+            lines.append(f"      candidate_status: '{item.get('candidate_status', '')}'")
+            lines.append(f"      candidate_action: '{item.get('candidate_action', '')}'")
+            lines.append(f"      mapped_action: '{item.get('mapped_action', '')}'")
+            lines.append(f"      decision: '{item.get('decision', '')}'")
+            lines.append(f"      reason: {json.dumps(item.get('reason', ''), ensure_ascii=False)}")
 
     with open(AGENDA_DECISIONS_FILE, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -689,6 +808,10 @@ def _write_agenda_decisions(data: dict):
 
 
 def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("usage: speak_gate.py <proposal.json | --stdin> [--include-agenda-candidates]")
+        return
+
     if "--include-agenda-candidates" in sys.argv:
         result = process_agenda_candidates()
         remaining = [a for a in sys.argv[1:] if a != "--include-agenda-candidates"]

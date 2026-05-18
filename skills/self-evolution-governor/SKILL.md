@@ -1,6 +1,6 @@
 ---
 name: self-evolution-governor
-description: Hermes metacognition, self-positioning, capability gap analysis, proactive improvement proposals, speak gate, and long-term agenda maturation engine. Elevates Hermes from task executor to self-operating agent.
+description: Hermes 的元认知、自我定位、能力缺口分析、主动改进提案与表达门禁、长期议程成熟引擎。用于让 Agent 从任务执行器升级为自我运营型智能体。
 version: 1.4.0
 author: Hermes Agent
 license: MIT
@@ -11,21 +11,11 @@ metadata:
 
 # Self Evolution Governor
 
-## Installation
-
-Copy or symlink this skill directory into your `$HERMES_HOME/skills/` (e.g., `$HERMES_HOME/skills/self-evolution-governor/`). The skill scripts reference `$HERMES_HOME` for all state file paths. Ensure the following environment variable is set:
-
-```bash
-export HERMES_HOME="/path/to/your/.hermes"
-```
-
-Then set up two cron jobs (see [Cron Integration Pattern](#cron-integration-pattern) below) pointing to the scripts in this skill's `scripts/` directory.
-
 ## Purpose
 
 This skill makes Hermes periodically and event-triggeredly reflect on its own role, the user's environment, recurring tasks, capability gaps, automation opportunities, memory quality, skill health, tool reliability, user satisfaction trends, session metadata shifts, and proposal feedback loops.
 
-The goal is not to let Hermes modify itself recklessly.
+The goal is not to let Hermes modify itself recklessly.  
 The goal is to let Hermes notice useful patterns, form hypotheses, generate self-improvement proposals, and decide when an idea is important enough to tell the user.
 
 ## Core Principle
@@ -40,15 +30,35 @@ Hermes should also ask:
 
 ## Operating Model
 
-Hermes maintains five internal artifacts:
+Hermes maintains four internal artifacts:
 
 1. `signals.jsonl` — Observed user behavior, repeated topics, failures, corrections, configuration changes, memory quality, skill health, tool reliability, satisfaction trends, session metadata, and proposal feedback.
 2. `self_agenda.yaml` — Open questions Hermes is tracking about its own role, user needs, and missing capabilities.
 3. `proposal_queue.yaml` — Concrete improvement proposals that may require user approval.
 4. `evolution_journal.md` — Historical record of observations, hypotheses, proposals, approvals, and outcomes.
-5. `agenda_candidates.yaml` — Buffer for mature agenda items awaiting the speak gate.
+5. `agenda_candidates.yaml` — Buffer for mature agenda items awaiting speak_gate.
 
-All files live under `$HERMES_HOME/state/evolution/`.
+## ⚠ Critical Lesson: Never Hardcode Focus Items
+
+**`build_runtime_digest.py` had a hardcoded `"Close the self-evolution feedback loop"` focus item** that was unconditionally emitted as the first focus item, every single time. It was not derived from any signal — it was a static string in `build_focus()`. This caused every session's runtime digest to display a fictitious priority that the user never asked for and that never reflected actual system state.
+
+**Root cause:** The original code used:
+```python
+focus_items = [
+    ("Close the self-evolution feedback loop",
+     "Recent proposals need consumption pipeline; runtime_digest is now active."),
+]
+```
+This was the *only* unconditional entry in the list. All other items (`cron_errors`, `ops_errors`, `llm_wiki_errors`) were conditionally appended only when actual problems existed — but the first item was always there, regardless.
+
+**Fix (2026-05-10):**
+- Deleted the hardcoded default entirely
+- `focus_items` starts as empty list
+- Every focus item is now derived from actual signal data (errors, corrections, gateway issues, project shifts)
+- When no signals fire, the focus section shows: `_None — no errors, corrections, or project shifts detected._`
+- `runtime_digest.md` omits the "## Current Focus" section entirely when there's nothing to report
+
+**Lesson for all future code:** Never hardcode a "default priority" that doesn't come from real signal data. A static priority item will linger forever, never get replaced, and mislead every session that reads it. If there's nothing to focus on, say nothing.
 
 ## Signal Source Reference
 
@@ -63,38 +73,50 @@ All files live under `$HERMES_HOME/state/evolution/`.
 | 7 | tool reliability | terminal/browser call failure rate | Medium |
 | 8 | user satisfaction trend | Correction word freq, follow-up count, msg length trend | Medium |
 | 9 | session metadata | Daily session vol, platform dist, task type dist | Medium |
-| 10 | proposal feedback loop | Approved/rejected proposal outcomes | Core |
+|| 10 | proposal feedback loop | Approved/rejected proposal outcomes | Core |
+|| 11 | curator operations | archive/prune/list-archived stats | Core |
+|| 12 | skill usage frequency | Load count per hour/day per skill | Core |
+|| 13 | skill lifecycle events | Skill creation/update/deletion timestamps | Core |
+|| 14 | cron dependency health | Upstream/downstream cron chain status | Core |
+|| 15 | platform connectivity | Platform connection state changes | Medium |
+|| 16 | gateway health alerts | Gateway log error pattern detection | Core |
 
 ## Signal Categories
 
-Use these signal types in `signals.jsonl`:
+Use these signal types in signals.jsonl:
 
-- `repeated_topic`
-- `repeated_manual_work`
-- `user_correction`
-- `failed_tool_call`
-- `successful_automation`
-- `config_change`
-- `skill_gap`
-- `memory_gap`
-- `risk_pattern`
-- `project_importance_change`
-- `platform_usage_change`
-- `opportunity_for_automation`
-- `opportunity_for_documentation`
-- `opportunity_for_monitoring`
-- `tool_reliability_degradation`
-- `user_satisfaction_decline`
-- `session_volume_change`
-- `proposal_feedback`
-- `memory_quality_decline`
-- `skill_staleness`
+- repeated_topic
+- repeated_manual_work
+- user_correction
+- failed_tool_call
+- successful_automation
+- config_change
+- skill_gap
+- memory_gap
+- risk_pattern
+- project_importance_change
+- platform_usage_change
+- opportunity_for_automation
+- opportunity_for_documentation
+- opportunity_for_monitoring
+- tool_reliability_degradation
+- user_satisfaction_decline
+- session_volume_change
+- proposal_feedback
+- memory_quality_decline
+- skill_staleness
+- curator_activity
+- skill_usage_change
+- cron_chain_broken
+- platform_offline
+- gateway_instability
+- protected_skill_alert
 
 ## Trigger Schedules
 
 | Task | Frequency | Signals Covered | Speak? |
 |------|-----------|----------------|--------|
-| Deep Reflection | Daily 04:00 | All 10 sources | High-score only |
+| Deep Reflection | Daily 04:00 | All 16 sources | High-score only |
 | Failure Trigger | On ops-gate fail | Failure signal | Urgent risk exempt |
 | Weekly Strategy | Mon 07:00 | All + weekly trends | Strategic level |
 
@@ -116,9 +138,9 @@ When activated, Hermes should answer each:
 12. What requires explicit user approval?
 13. What happened to previous proposals? (feedback loop)
 
-## Speak-Out Gate
+## Speak-Out Gate (V1.2)
 
-Hermes should not report every thought. A two-score system governs when to speak.
+Hermes should not report every thought. Two-score system:
 
 ### Scoring Model
 
@@ -143,15 +165,14 @@ speak_score     = priority_score - interruption_cost(0.20) - repeat_penalty
 | Bonus | Value | Applied to |
 |-------|-------|-----------|
 | strategic_bonus | +0.12 | strategic_reflection type |
-| urgency_bonus   | +0.15 | urgent=true events |
+| urgency_bonus | +0.15 | urgent=true events |
 
 ### Decision Reason Traceability
 
-Every decision outputs `decision_reason`. This is not optional — without it, scored decisions are opaque and un-debuggable within days.
+**Critical: every decision outputs `decision_reason`.** This is not optional — without it, scored decisions are opaque and un-debuggable within days.
 
 The `speak_gate.py` script outputs a JSON array at `decision_reason` containing every step:
-
-```json
+```
 [
   "weighted = 0.85×0.40 + 0.9×0.25 + 0.8×0.35 = 0.845",
   "× risk_dampener[low=0.97] → 0.8196",
@@ -177,7 +198,46 @@ Each entry traces one atomic step:
 6. Decision gate evaluation (which condition fired)
 7. Quota check result
 
-### Decision Conditions
+### Verified Scenario Behavior
+
+Tested against 10 real-world scenarios with the V1.2 formula:
+
+| # | Scenario | priority | speak | Action | Correct? |
+|---|----------|----------|-------|--------|----------|
+| A | Grafana 15 failures | 1.00 | 0.80 | speak_now_risk_alert | ✅ |
+| B | LLM-Wiki 8% anomaly | 0.52 | 0.32 | daily_digest | ✅ |
+| C | Skill suggestion (weak evidence) | 0.57 | 0.37 | daily_digest | ✅ |
+| D | Clear automation opportunity | 0.82 | 0.62 | speak_now | ✅ |
+| E | Weekly strategic review | 0.92 | 0.72 | speak_now | ✅ |
+| F | Low-impact code cleanup | 0.43 | 0.23 | daily_digest | ✅ |
+| G | High-impact zero-evidence guess | 0.28 | 0.08 | silent_log_only | ✅ |
+| H | Urgent outage alert | 1.00 | 0.93 | speak_now_risk_alert | ✅ |
+| I | Medium-risk good proposal | 0.64 | 0.44 | proposal_queue | ✅ |
+| J | High-risk valuable suggestion | 0.46 | 0.26 | daily_digest | ✅ |
+
+All 10 pass — the formula reliably separates "worth speaking" from "needs review" from "discard".
+
+### Quota Traceability
+
+The `speak_gate.py` output includes a `would_have_spoken_without_quota` boolean field. This is critical for tuning — it tells you whether a proposal was silenced by **quality** (score below threshold) or by **capacity** (daily quota exhausted).
+
+```
+\"action\": \"proposal_queue\",
+\"would_have_spoken_without_quota\": true,
+\"decision_reason\": [
+    ...
+    \"  quota: suggestion_quota_exceeded → downgraded to proposal_queue\"
+]
+```
+
+Without this field, quota-exceeded proposals look identical to low-score proposals — you can't distinguish \"good idea, no time today\" from \"bad idea, silent.\"
+
+Daily quotas are enforced by `speak_quota.json` at `/vol1/.hermes/state/evolution/speak_quota.json`:
+- Max 3 suggestions spoken per day
+- Max 1 strategic reflection spoken per day
+- Urgent risk alerts exempt
+- When quota is exceeded, the action is automatically downgraded to `proposal_queue`
+- Quota is persistent across cron runs and resets daily at midnight
 
 | Condition | Action |
 |-----------|--------|
@@ -190,49 +250,26 @@ Each entry traces one atomic step:
 | priority < 0.40 | `silent_log_only` — discard |
 
 ### Quotas
-
-Daily quotas are enforced by `speak_quota.json` at `$HERMES_HOME/state/evolution/speak_quota.json`:
 - Max 3 suggestions spoken per day
 - Max 1 strategic reflection spoken per day
 - Urgent risk alerts exempt
-- When quota is exceeded, the action is automatically downgraded to `proposal_queue`
-- Quota is persistent across cron runs and resets daily at midnight
-
-### Quota Traceability
-
-The `speak_gate.py` output includes a `would_have_spoken_without_quota` boolean field. This is critical for tuning — it tells you whether a proposal was silenced by **quality** (score below threshold) or by **capacity** (daily quota exhausted).
-
-```json
-{
-  "action": "proposal_queue",
-  "would_have_spoken_without_quota": true,
-  "decision_reason": [
-    "...",
-    "  quota: suggestion_quota_exceeded → downgraded to proposal_queue"
-  ]
-}
-```
-
-Without this field, quota-exceeded proposals look identical to low-score proposals — you can't distinguish "good idea, no time today" from "bad idea, silent."
 
 ### Speak Format
 
-When speaking to the user, use this structure:
-
 ```
-I noticed something worth your attention:
+我观察到一个值得你注意的趋势：
 
-• Observation:
-• Evidence:
-• Assessment:
-• Suggestion:
-• Risk:
-• Needs your approval:
+• 现象：
+• 证据：
+• 判断：
+• 建议：
+• 风险：
+• 是否需要你批准：
 ```
 
 ## Proposal Format
 
-Every self-improvement proposal must include these fields (see `templates/proposal.yaml`):
+Every self-improvement proposal must include these fields (templates/proposal.yaml):
 
 ```yaml
 title: str
@@ -260,7 +297,7 @@ status: pending | approved | rejected | implemented | failed
 created_at: str
 ```
 
-The `actionability` field is critical — without it, the decision layer cannot distinguish "important observation" from "actionable improvement". Low actionability (< 0.60) blocks speaking even if priority is high.
+The `actionability` field is critical — without it, the decision layer cannot distinguish "important observation" from "actionable improvement". Low actionability (< 0.60) blocks speak even if priority is high.
 
 ## Priority Control Hierarchy
 
@@ -268,9 +305,9 @@ When multiple inputs conflict, the following hierarchy applies (highest to lowes
 
 1. Hard safety boundaries / security rules (不可逾越)
 2. SOUL.md — stable identity contract
-3. `runtime_digest.md` — current operational context (advisory, auto-injected)
+3. runtime_digest.md — current operational context (advisory, auto-injected)
 4. User's current task / explicit request
-5. `proposal_queue.yaml` / `self_agenda.yaml` — reference data
+5. proposal_queue.yaml / self_agenda.yaml — reference data
 6. ops-gate-automation — execution gate for approved changes
 
 This means:
@@ -307,7 +344,7 @@ If a proposal involves memory changes → route through memory-change-approval-g
 
 ---
 
-## Closed-Loop Feedback Architecture
+## Closed-Loop Feedback Architecture (V1.2)
 
 The self-evolution-governor must NOT be a side-channel that only writes files no one reads. It must close the loop back into the running Hermes Agent.
 
@@ -330,12 +367,11 @@ self-evolution-governor
 ### Injecting Into Running Hermes
 
 **Critical lesson: behavioral instructions in SOUL.md are not enough.**
-
 The skill originally relied on SOUL.md telling Hermes "consult runtime_digest.md when available" — but in practice, LLMs skip behavioral instructions that don't feel immediately relevant to the current task. The file was being written but rarely read.
 
 **Solution: code-level auto-injection via `prompt_builder.py`**
 
-The file `$HERMES_HOME/hermes-agent/agent/prompt_builder.py` must be modified to add a `_load_runtime_digest()` function that reads `$HERMES_HOME/state/evolution/runtime_digest.md` and injects it into the session's `# Project Context` system prompt section — right alongside SOUL.md and AGENTS.md.
+The file `/vol1/.hermes/hermes-agent/agent/prompt_builder.py` was modified to add a `_load_runtime_digest()` function that reads `/vol1/.hermes/state/evolution/runtime_digest.md` and injects it into the session's `# Project Context` system prompt section — right alongside SOUL.md and AGENTS.md.
 
 The bridge is now `runtime_digest.md` + a code hook. It is:
 - **Short**: < 2KB (trim aggressively — runtime context is expensive)
@@ -364,7 +400,6 @@ def _load_runtime_digest() -> str:
 ```
 
 Called at the end of `build_context_files_prompt()`:
-
 ```python
     # Runtime digest — short operational context from self-evolution-governor
     digest_content = _load_runtime_digest()
@@ -374,7 +409,7 @@ Called at the end of `build_context_files_prompt()`:
 
 This ensures the digest is injected into every Hermes session (Telegram, CLI, WeChat, etc.) without requiring the LLM to "think about reading it." Cron sessions (`skip_context_files=True`) correctly skip it — they generate the digest, they don't need to read it.
 
-**Digest expiration:** `_load_runtime_digest()` parses the `Valid until:` line from the digest content. If the timestamp is in the past, the function silently returns `""` — the digest is skipped, not injected with stale data.
+**Digest expiration:** `_load_runtime_digest()` parses the `Valid until:` line from the digest content. If the timestamp is in the past, the function silently returns `""` — the digest is skipped, not injected with stale data. This prevents old focus items from misleading Hermes after the digest has aged out.
 
 ```python
 # Inside _load_runtime_digest():
@@ -391,24 +426,24 @@ No error is raised — expired digest is treated the same as "file not found." H
 
 **SOUL.md was updated** to reflect this: instead of saying "consult runtime_digest.md when available", it now says:
 
-> **Runtime digest (`$HERMES_HOME/state/evolution/runtime_digest.md`) is automatically loaded by Hermes into every session's system prompt** (via `_load_runtime_digest()` in `prompt_builder.py`), alongside SOUL.md. It contains current focus areas, pending proposals, and recent issues — no manual lookup needed.
+> **Runtime digest (`/vol1/.hermes/state/evolution/runtime_digest.md`) is automatically loaded by Hermes into every session's system prompt** (via `_load_runtime_digest()` in `prompt_builder.py`), alongside SOUL.md. It contains current focus areas, pending proposals, and recent issues — no manual lookup needed.
 
 Format:
-
-```markdown
+```
 # Hermes Runtime Digest
-Last updated: <YYYY-MM-DD HH:MM>
-Valid until: <YYYY-MM-DD HH:MM>
+Last updated: 2026-04-28 04:00
+Valid until: 2026-04-29 04:00
 
 ## Current Focus
-1. <focus item 1>
-2. <focus item 2>
+1. Close self-evolution feedback loop
+2. Stabilize ops-gate automation
+3. Harden LLM-Wiki automation
 
 ## Proposals Awaiting Your Decision
-- <proposal ID> (priority=<score>, risk=<level>): <title>
+- P-20260428-001 (priority=0.82, risk=low): Create hermes-config-audit skill
 
 ## Recent Issues (24h)
-- ⚠ <issue description>
+- ⚠ cron `b581a23d2886` error at ...
 
 ## Runtime Guidance
 - Self-evolution outputs are advisory unless approved.
@@ -429,24 +464,25 @@ Valid until: <YYYY-MM-DD HH:MM>
 
 | Document | What Was Added | Why |
 |----------|---------------|-----|
-| `$HERMES_HOME/SOUL.md` | Self-Evolution Awareness section | Tells running Hermes to check state files |
-| `$HERMES_HOME/scripts/automation_baseline.md` | Section G — Self-Evolution Governor | System asset registry |
+| `/vol1/.hermes/SOUL.md` | Self-Evolution Awareness section | Tells running Hermes to check state files |
+| `/vol1/.hermes/scripts/automation_baseline.md` | Section G — Self-Evolution Governor | System asset registry |
+| `/root/.hermes/memories/MEMORY.md` | Self-evolution system record | Cross-session persistence |
 
-### Auto-Verification & Cleanup Scope
+### V1.3a: Auto-Verification & Cleanup Scope
 
-Two flags are available in `proposal_router.py`:
+Added two flags to `proposal_router.py`:
 
 **`--verify-implemented`** — Scans proposals with `execution.status=implemented`, checks `verification.method` against a 12-pattern whitelist, and promotes to `verified`. The whitelist rejects shell metacharacters (`;`, `|`, `$`, `` ` ``, `()`, `{}`, `\\`), empty strings, and strings shorter than 10 chars.
 
 **`--cleanup-scope`** — Documents exact cleanup boundaries. Cleanup only affects:
-- `draft`/`pending_user_approval` → expired if past `expires_at`
+- `draft`/`pending_user_approval` → expired if past expires_at
 - `draft`/`pending_user_approval` → deferred if > 7 days stale
 - Terminal states (implemented/verified/rejected/expired/failed/deferred/rollback_required) → archived if > 14 days
 - **Protected**: `approved`, `scheduled`, `running` — NEVER touched
 
-### Exit Code Primary Detection
+### V1.3a: Exit Code Primary Detection
 
-Cron signal detection uses a three-layer architecture:
+Refactored `collect_signals.py` cron signal detection to a three-layer architecture:
 
 | Layer | Priority | Detection Method | Description |
 |-------|----------|-----------------|-------------|
@@ -454,20 +490,19 @@ Cron signal detection uses a three-layer architecture:
 | 2 | ALWAYS | `Traceback (most recent call last)` | Never false positive |
 | 3 | **FALLBACK** | Context-aware regex (8 guards) | Only activates if exit_code=0/absent AND no traceback |
 
----
+Results: 242 old false positives → 0 across 24h/48h/7d scans.
 
-## Agenda Maturation Engine
+### V1.4: Agenda Maturation Engine
 
-The Agenda Maturation Engine solves a structural gap: `self_agenda.yaml` items had no automated progression. Problems went in and stayed "yellow" forever.
+The Agenda Maturation Engine solves a structural gap: self_agenda.yaml items had no automated progression. Problems went in and stayed "yellow" forever.
 
 **Core philosophy:** time is pressure, not evidence. An item observed for 30 days with zero new evidence should not mature due to age alone.
 
-### Files
+**New file:** `agenda_maturation.py` — reads self_agenda.yaml + signals.jsonl + proposal_queue.yaml, calculates maturity_score, advances state, outputs agenda_candidates.yaml, writes evolution_journal.
 
-- **`agenda_maturation.py`** — reads `self_agenda.yaml` + `signals.jsonl` + `proposal_queue.yaml`, calculates `maturity_score`, advances state, outputs `agenda_candidates.yaml`, writes `evolution_journal`.
-- **`agenda_candidates.yaml`** — buffer file. `agenda_maturation.py` outputs mature candidates here; `speak_gate.py` consumes from here.
+**New file:** `agenda_candidates.yaml` — buffer file. agenda_maturation.py outputs mature candidates here; speak_gate.py consumes from here (in shadow-mode, speak_gate is not yet connected).
 
-### Agenda Item Types
+**5 agenda item types:**
 
 | Type | Action When Mature | Rationale |
 |------|-------------------|-----------|
@@ -477,7 +512,7 @@ The Agenda Maturation Engine solves a structural gap: `self_agenda.yaml` items h
 | quality_improvement | `create_proposal` | Signal quality, digest, cron, router improvements |
 | cleanup_candidate | `surface_in_digest` | Low priority, passive notification only |
 
-### State Machine
+**State machine (simplified V1.4):**
 
 ```
 observing → accumulating_evidence → candidate_ready
@@ -494,7 +529,7 @@ observing → accumulating_evidence → candidate_ready
 | resolved | User confirmed, proposal completed, or issue closed |
 | archived | No longer relevant or expired |
 
-### Maturity Score Formula
+**maturity_score formula:**
 
 ```
 maturity_score =
@@ -507,11 +542,13 @@ maturity_score =
   - staleness_penalty
 ```
 
-- `contradiction_penalty` = 0.0 (disabled by default — contradiction is hard to define)
+- `contradiction_penalty` = 0.0 (disabled in MVP — contradiction is hard to define)
 - `time_pressure_bonus = min(0.12, log(days + 1) × 0.03)`
 - If `evidence_count == 0`, time_pressure does not trigger maturation — only review/archive
 
-### Default Thresholds (all configurable)
+**V1.4 shadow-mode:** First 2-3 days, agenda_maturation.py calculates and journals but does NOT connect to speak_gate. This prevents score drift from causing premature interruptions before calibration.
+
+**Default thresholds:**
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
@@ -523,7 +560,7 @@ maturity_score =
 | same_agenda_cooldown_days | 7 | Don't re-surface same item within |
 | max_surface_per_day | 1 | Max one mature agenda surfaced daily |
 
-### Cooldown and Archive Rules
+**Cooldown and archive rules:**
 
 | Rule | Value | Effect |
 |------|-------|--------|
@@ -532,25 +569,37 @@ maturity_score =
 | auto_archive_if_no_evidence_days | 21 | Prevents agenda bloat |
 | force_review_if_observing_days | 30 | Catches stuck items |
 
-### Audit Requirement
+**Audit requirement:** Every agenda_maturation.py run MUST write to evolution_journal.md, even if no items changed. Records: items_scanned, items_updated, matured_items, score_delta per item.
 
-Every `agenda_maturation.py` run MUST write to `evolution_journal.md`, even if no items changed. Records: `items_scanned`, `items_updated`, `matured_items`, `score_delta` per item.
+**V1.4 cron order (daily 04:00):**
 
-### self_agenda.yaml Structure
+```
+1. collect_signals.py
+2. proposal_router.py --cleanup
+3. proposal_router.py --verify-implemented
+4. agenda_maturation.py --write-journal --emit-candidates
+5. speak_gate.py
+6. build_runtime_digest.py
+7. update evolution_journal.md
+```
+
+agenda_maturation runs BEFORE build_runtime_digest so the digest can reflect latest maturity state.
+
+### V1.4 self_agenda.yaml Structure
 
 ```yaml
 version: 1.4
-updated_at: "<ISO 8601 timestamp>"
+updated_at: "2026-04-29T12:00:00+08:00"
 
 agenda_items:
-  - id: A-<YYYYMMDD>-<NNN>
-    title: "<Question or topic being tracked>"
-    question: "<What Hermes is trying to learn>"
-    type: strategic_positioning | automation_opportunity | risk_watch | quality_improvement | cleanup_candidate
-    status: observing | accumulating_evidence | candidate_ready | surfaced | resolved | archived
+  - id: A-20260429-001
+    title: 用户当前最高优先级项目
+    question: 用户当前最应该让 Hermes 聚焦的项目是什么？
+    type: strategic_positioning
+    status: accumulating_evidence
 
-    first_seen_at: "<ISO 8601 timestamp>"
-    last_evidence_at: "<ISO 8601 timestamp>"
+    first_seen_at: "2026-04-29T04:00:00+08:00"
+    last_evidence_at: "2026-04-29T04:00:00+08:00"
     last_matured_at: null
     last_surfaced_at: null
 
@@ -560,31 +609,34 @@ agenda_items:
         - verified_proposal
         - config_change
       include_keywords:
-        - <keyword>
+        - self-evolution
+        - proposal_router
+        - runtime_digest
+        - maturation
       exclude_keywords: []
 
     evidence:
-      - at: "<timestamp>"
-        source: "<source name>"
-        summary: "<description>"
-        weight: 0.0~1.0
+      - at: "2026-04-29T04:00:00+08:00"
+        source: self_agenda_init
+        summary: Agenda item created during V1.4-MVP migration
+        weight: 0.15
 
     counters:
-      evidence_count: 0
-      observation_days: 0
+      evidence_count: 1
+      observation_days: 1
       recent_mentions_7d: 0
       contradiction_count: 0
 
     scores:
-      evidence_strength: 0.0
-      trend_strength: 0.0
-      recurrence_density: 0.0
-      unresolved_cost: 0.0
-      actionability: 0.0
-      time_pressure_bonus: 0.0
-      staleness_penalty: 0.0
-      contradiction_penalty: 0.0
-      maturity_score: 0.0
+      evidence_strength: 0.15
+      trend_strength: 0.50
+      recurrence_density: 0.10
+      unresolved_cost: 0.50
+      actionability: 0.80
+      time_pressure_bonus: 0.03
+      staleness_penalty: 0.00
+      contradiction_penalty: 0.00
+      maturity_score: 0.32
 
     maturity_policy:
       min_score_to_surface: 0.72
@@ -594,7 +646,7 @@ agenda_items:
       auto_archive_if_no_evidence_days: 21
       same_agenda_cooldown_days: 7
 
-    next_action_when_mature: ask_user_confirmation | create_proposal | bypass_maturation | surface_in_digest
+    next_action_when_mature: ask_user_confirmation
 
 maturity_config:
   weights:
@@ -615,13 +667,7 @@ maturity_config:
   max_surface_per_day: 1
 ```
 
-### Shadow Mode (First Deployment)
-
-On first deployment, it is recommended to run `agenda_maturation.py` in observation-only mode for 2-3 days: calculate and journal but do NOT connect to `speak_gate`. This prevents score drift from causing premature interruptions before calibration.
-
----
-
-## Scripts Overview
+### Scripts Overview (V1.4)
 
 | Script | Purpose | Input | Output |
 |--------|---------|-------|--------|
@@ -632,14 +678,32 @@ On first deployment, it is recommended to run `agenda_maturation.py` in observat
 | `build_runtime_digest.py` | Generate session context digest | signals.jsonl, proposal_queue.yaml, self_agenda.yaml | runtime_digest.md + HERMES_FOCUS.md |
 
 Paths:
-- `$HERMES_HOME/state/evolution/signals.jsonl`
-- `$HERMES_HOME/state/evolution/self_agenda.yaml`
-- `$HERMES_HOME/state/evolution/proposal_queue.yaml`
-- `$HERMES_HOME/state/evolution/agenda_candidates.yaml`
-- `$HERMES_HOME/state/evolution/evolution_journal.md`
-- `$HERMES_HOME/state/evolution/speak_quota.json`
+- /vol1/.hermes/state/evolution/signals.jsonl
+- /vol1/.hermes/state/evolution/self_agenda.yaml
+- /vol1/.hermes/state/evolution/proposal_queue.yaml
+- /vol1/.hermes/state/evolution/agenda_candidates.yaml
+- /vol1/.hermes/state/evolution/evolution_journal.md
 
-Scripts reside in this skill's `scripts/` directory.
+Scripts:
+- collect_signals.py — Collect all 10 signal sources (V1.3a: exit_code primary)
+- speak_gate.py — Score and gate proactive suggestions
+- proposal_router.py — Proposal status machine (V1.3a: --verify-implemented, --cleanup, --cleanup-scope)
+- agenda_maturation.py — Agenda maturation engine (V1.4: maturity_score, state machine, candidates)
+- `build_runtime_digest.py` — Generate runtime digest + HERMES_FOCUS
+
+Reference docs:
+- `references/hindsight-memory-cleanup.md` — Hindsight API endpoints and bank reset procedure
+- `references/hindsight-assessment-methodology.md` — Memory assessment process: classify → delete all → recreate clean, with keeper guidelines
+
+Proposals move through a 10-state machine. Terminal states are marked with ⊕.
+
+```
+draft ──→ pending_user_approval ──→ approved ──→ scheduled ──→ running ──→ implemented ──→ verified ⊕
+                                       │                          │
+                                       ├── rejected ⊕             ├── failed ⊕
+                                       ├── deferred ⊕             └── rollback_required
+                                       └── expired ⊕
+```
 
 ### Script: proposal_router.py
 
@@ -664,19 +728,27 @@ Transition rules:
 - `implemented` → `verified`: Manual or automated verification pass
 - `draft` → `expired`: Auto-expire after `timestamps.expires_at`
 
-### Proposal State Machine
+### V1.5: Signal-Driven Focus — No Hardcoded Defaults
 
-```
-draft ──→ pending_user_approval ──→ approved ──→ scheduled ──→ running ──→ implemented ──→ verified ⊕
-                                       │                          │
-                                       ├── rejected ⊕             ├── failed ⊕
-                                       ├── deferred ⊕             └── rollback_required
-                                       └── expired ⊕
-```
+**Problem discovered 2026-05-10:** `build_runtime_digest.py` had a hardcoded focus item `"Close the self-evolution feedback loop"` that was unconditionally prepended before error-driven items. It was never removed, even after the feedback loop was closed and running for a week. The user's actual current priority was never read from signals — the hardcoded text just sat there forever.
+
+**Fix applied:**
+- `build_focus()` now starts with an empty `focus_items = []`
+- Focus items are **entirely signal-driven**: cron errors → ops-gate failures → user corrections → gateway issues → project shifts
+- When no focus items exist: HERMES_FOCUS.md shows `_None — no errors, corrections, or project shifts detected._`
+- runtime_digest.md `## Current Focus` section is **omitted entirely** when there are no focus items (saves tokens, no noise)
+- The digest reads `## Current Focus` from DISK (`HERMES_FOCUS.md`), not from in-memory — so the digest reflects the real state
+
+**Hard rule: Never hardcode focus items.** If there is nothing wrong, the system should self-report nothing. A permanently-present focus item that never goes away is indistinguishable from noise — the user learns to ignore it.
+
+**Verification:**
+- After fix: HERMES_FOCUS.md shows `_None — ..._` when no signals fire
+- After fix: runtime_digest.md has no `## Current Focus` section when focus is empty (357 bytes vs 422 bytes)
+- Dry-run and live run both validate the logic
 
 ### Script: build_runtime_digest.py
 
-Generates both `runtime_digest.md` and `HERMES_FOCUS.md`:
+Generates both `runtime_digest.md` and `HERMES_FOCUS.md` from actual signal data:
 
 ```bash
 python3 build_runtime_digest.py              # Full update
@@ -685,7 +757,7 @@ python3 build_runtime_digest.py --dry-run      # Preview, don't write
 
 - Scans signals.jsonl for recent errors (24h)
 - Reads proposal_queue.yaml for pending/approved proposals
-- Extracts focus from HERMES_FOCUS.md
+- Focus items derived from signal data (errors, corrections, project shifts) — no hardcoded defaults
 - Generates digest (< 2KB) with recent issues, pending proposals, runtime guidance
 - Focus only writes to disk if content changed (avoids unnecessary diffs)
 
@@ -706,46 +778,26 @@ p = create_proposal(
     evidence=[{"type": "...", "source": "...", "summary": "..."}],
     suggested_action="...",
 )
-```
+
 
 ## Cron Integration Pattern
 
-**Known limitation:** The cron `script` parameter has strict path validation that rejects symlinks and paths outside `~/.hermes/scripts/`. Workaround: run scripts via full path from within the prompt using `terminal()`:
+**Known limitation: the cron `script` parameter has strict path validation that rejects symlinks and paths outside `~/.hermes/scripts/`.** Workaround: run scripts via full path from within the prompt using `terminal()`:
 
 ```text
 # In cron prompt — DO NOT use the `script` parameter:
-python3 $HERMES_HOME/skills/self-evolution-governor/scripts/collect_signals.py
+python3 /vol1/.hermes/skills/dogfood/self-evolution-governor/scripts/collect_signals.py
 ```
 
-Two cron jobs should be set up for this skill:
-1. **Daily Deep Reflection** — `0 4 * * *`, signals collected in-prompt
-2. **Weekly Strategic Review** — `0 7 * * 1`, `COLLECT_DAYS=7`
+Two cron jobs are set up for this skill:
+1. **Daily Deep Reflection** (`77509e97ffd1`) — 0 4 * * *, signals collected in-prompt
+2. **Weekly Strategic Review** (`539a782fea12`) — 0 7 * * 1, COLLECT_DAYS=7
 
 Both use these enabled_toolsets: terminal, file, search
 
-### Daily Reflection Cron Order
-
-The daily 04:00 cron pipeline should execute in this order:
-
-```
-1. collect_signals.py
-2. proposal_router.py --cleanup
-3. proposal_router.py --verify-implemented
-4. agenda_maturation.py --write-journal --emit-candidates
-5. speak_gate.py
-6. build_runtime_digest.py
-7. update evolution_journal.md
-```
-
-`agenda_maturation.py` runs BEFORE `build_runtime_digest.py` so the digest can reflect the latest maturity state.
-
-### Cron Does NOT Load Runtime Digest
-
-Cron sessions use `skip_context_files=True` by default (no workdir). This is **correct** — the daily reflection cron **generates** the digest, it doesn't need to read it. Live Hermes sessions (Telegram, CLI, WeChat) use `skip_context_files=False` and will have the digest auto-injected.
-
 ## Output: Daily Reflection Report
 
-```markdown
+```
 # Hermes Daily Self-Evolution Report
 
 ## 1. Key Observations
@@ -761,6 +813,12 @@ Cron sessions use `skip_context_files=True` by default (no workdir). This is **c
 ## 11. Should Tell User Now?
 ```
 
+### Cron Does NOT Load Runtime Digest
+
+Cron sessions use `skip_context_files=True` by default (no workdir). This is **correct** — the daily reflection cron **generates** the digest, it doesn't need to read it. Live Hermes sessions (Telegram, CLI, WeChat) use `skip_context_files=False` and will have the digest auto-injected.
+
+**Pitfall: Mercury agent** runs its own check every 5 minutes for `task.json` in `/vol1/.hermes/mercury-bridge/`. When the task file doesn't exist, it may incorrectly report "directory not found" and suggest lowering the poll interval. Verify the directory actually exists before acting on such suggestions. Local stat() calls cost ~0.1ms — 288 polls/day is negligible overhead.
+
 ## Acceptance Criteria
 
 Working correctly when Hermes can:
@@ -774,24 +832,3 @@ Working correctly when Hermes can:
 8. Report memory quality trends
 9. Detect tool reliability degradation
 10. Close the proposal feedback loop
-
----
-
-## Portability Notes
-
-This SKILL.md has been prepared as a portable, shareable instruction set for any Hermes installation.
-
-**Key portability changes from the original:**
-- All paths use `$HERMES_HOME` instead of hardcoded paths (e.g., `/vol1/.hermes/`). Set `export HERMES_HOME=/path/to/your/.hermes` before running scripts.
-- User-specific dates, evidence examples, and environment references have been removed or genericized.
-- The `_load_runtime_digest()` function references `get_hermes_home()` — ensure your Hermes Agent's `prompt_builder.py` has this utility (it resolves `$HERMES_HOME`).
-- Cron job IDs from the original installation have been omitted; create your own cron jobs following the pattern described above.
-- The Mercury bridge reference from the original has been removed as it is environment-specific.
-- All threshold values (speak gate scores, quotas, maturation parameters) are documented with defaults; adjust them to suit your environment.
-
-**Required setup steps after installation:**
-1. Set `export HERMES_HOME=/path/to/your/.hermes` in your shell profile and Hermes Agent environment.
-2. Add the `_load_runtime_digest()` function to your `prompt_builder.py` (see pattern above).
-3. Update `$HERMES_HOME/SOUL.md` with the Self-Evolution Awareness section.
-4. Create two cron jobs as described in the Cron Integration Pattern.
-5. On first deployment, run `agenda_maturation.py` in shadow mode (without connecting to speak_gate) for 2-3 days to calibrate.

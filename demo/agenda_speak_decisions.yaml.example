@@ -1,0 +1,77 @@
+# agenda_speak_decisions.yaml.example
+# Anonymized example of the agenda speak gate output
+# See: /vol1/.hermes/state/evolution/agenda_speak_decisions.yaml (live instance)
+
+version: 1
+generated_at: '2026-05-18T04:00:32.064689+08:00'
+agenda_speak_mode: active
+allow_external_send: false
+candidates_found: 2
+decisions:
+  - candidate_id: 'A-YYYYMMDD-NNN'
+    title: 'Example automation pipeline completeness'
+    type: 'quality_improvement'
+    candidate_kind: 'agenda_candidate'
+    candidate_status: 'candidate_ready'
+    candidate_action: 'create_proposal'
+    decision: surface
+    reason: 'all secondary gates passed'
+    mapped_action: 'proposal_preview'
+    secondary_gate:
+      actionable_qualified_count: 40
+      actionable_qualified_count_pass: true
+      evidence_strength: 1.0
+      min_evidence_strength: 0.25
+      evidence_strength_pass: true
+      cooldown_passed: true
+      cooldown_days_remaining: 0
+      quota_available: true
+      is_risk_watch: false
+    message_preview: "[proposal_preview] Evolution discovered improvement opportunity:\n• Agenda: Example automation pipeline completeness\n• Evidence: N signals\n• Suggestion: consider converting this direction into a concrete improvement proposal"
+
+  - candidate_id: 'A-YYYYMMDD-NNN'
+    title: 'Example monitoring anomaly trend'
+    type: 'risk_watch'
+    candidate_kind: 'quality_proposal'
+    candidate_status: 'quality_proposal_ready'
+    candidate_action: 'generate_quality_proposal'
+    decision: suppressed
+    reason: 'daily surface quota exhausted (1/1)'
+    mapped_action: 'none (suppressed)'
+    secondary_gate:
+      actionable_qualified_count: 14
+      actionable_qualified_count_pass: true
+      evidence_strength: 1.0
+      min_evidence_strength: 0.2
+      evidence_strength_pass: true
+      cooldown_passed: true
+      cooldown_days_remaining: 0
+      quota_available: false
+      is_risk_watch: false
+    message_preview: "[quality_proposal_preview] Monitoring trend is ready for owner approval:\n• Agenda: Example monitoring anomaly trend\n• Evidence: N signals\n• Recommendation: approve or reject drafting a concrete quality proposal"
+
+summary:
+  total_candidates: 2
+  surfaced: 1
+  suppressed: 1
+  candidate_kind_counts:
+    agenda_candidate: 1
+    quality_proposal: 1
+  surfaced_candidates:
+    - candidate_id: 'A-YYYYMMDD-NNN'
+      title: 'Example automation pipeline completeness'
+      candidate_kind: 'agenda_candidate'
+      candidate_status: 'candidate_ready'
+      candidate_action: 'create_proposal'
+      mapped_action: 'proposal_preview'
+      decision: 'surface'
+      reason: "all secondary gates passed"
+  ready_not_surfaced_candidates:
+    - candidate_id: 'A-YYYYMMDD-NNN'
+      title: 'Example monitoring anomaly trend'
+      candidate_kind: 'quality_proposal'
+      candidate_status: 'quality_proposal_ready'
+      candidate_action: 'generate_quality_proposal'
+      mapped_action: 'none (suppressed)'
+      decision: 'suppressed'
+      reason: "daily surface quota exhausted (1/1)"

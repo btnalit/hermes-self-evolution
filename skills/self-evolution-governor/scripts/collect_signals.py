@@ -7,9 +7,12 @@ Designed to be run by cron daily (04:00) and event-triggered on ops-gate failure
 from __future__ import annotations
 
 import json
+import argparse
+import hashlib
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from inspect import signature
@@ -66,6 +69,7 @@ JOURNAL_FILE = EVOLUTION_DIR / "evolution_journal.md"
 HERMES_CONFIG = Path("/vol1/.hermes/config.yaml")
 HERMES_ENV = Path("/vol1/.hermes/.env")
 CRON_JOBS_FILE = Path("/vol1/.hermes/cron/jobs.json")
+SANNAI_CRON_JOBS_FILE = Path("/root/.hermes/profiles/sannai/cron/jobs.json")
 
 # ── V1.5: Signal delta-state tracking (Stage 2 denoising) ──
 # Cache files track last-known state per signal source.
@@ -73,6 +77,12 @@ CRON_JOBS_FILE = Path("/vol1/.hermes/cron/jobs.json")
 LIFECYCLE_CACHE = EVOLUTION_DIR / ".lifecycle_delta_cache.json"
 HEALTH_CACHE = EVOLUTION_DIR / ".skill_health_delta_cache.json"
 ABSENT_CACHE = EVOLUTION_DIR / ".source_absent_delta_cache.json"
+CRON_SIGNAL_CACHE = EVOLUTION_DIR / ".cron_signal_delta_cache.json"
+CRON_NO_AGENT_CACHE = EVOLUTION_DIR / ".cron_no_agent_delta_cache.json"
+MCP_HEALTH_CACHE = EVOLUTION_DIR / ".mcp_health_delta_cache.json"
+GATEWAY_HEALTH_CACHE = EVOLUTION_DIR / ".gateway_health_delta_cache.json"
+
+DRY_RUN = "--dry-run" in sys.argv or os.environ.get("COLLECT_DRY_RUN") == "1"
 
 
 def _load_cache(cache_file: Path) -> dict:
@@ -85,7 +95,12 @@ def _load_cache(cache_file: Path) -> dict:
 
 
 def _save_cache(cache_file: Path, state: dict):
-    cache_file.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
+    if DRY_RUN:
+        return
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = cache_file.with_name(f"{cache_file.name}.tmp")
+    tmp_file.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
+    tmp_file.replace(cache_file)
 
 
 def now_iso() -> str:
@@ -94,6 +109,11 @@ def now_iso() -> str:
 
 def today_str() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d")
+
+
+def _stable_hash(value) -> str:
+    data = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
 
 
 # ── Signal dedup key (V1.4.1a: signal-type-aware composite key) ──
@@ -121,6 +141,23 @@ def _build_signal_dedup_key(sig: dict) -> str:
     elif sig_type == "cron_result":
         return (f"cron:{sig.get('job_id','?')}:"
                 f"{sig.get('mtime','')}:{sig.get('has_error','')}")
+    elif sig_type == "cron_signal_summary":
+        return (f"cron_signal_summary:{sig.get('summary_day','?')}:"
+                f"{sig.get('summary_fingerprint','?')}")
+    elif sig_type == "cron_failure":
+        return (f"cron_failure:{sig.get('job_id','?')}:"
+                f"{sig.get('mtime','')}:{sig.get('failure_kind','')}")
+    elif sig_type == "cron_recovery":
+        return (f"cron_recovery:{sig.get('job_id','?')}:"
+                f"{sig.get('mtime','')}")
+    elif sig_type == "cron_prompt_scan_block":
+        return (f"cron_prompt_scan_block:{sig.get('profile','?')}:"
+                f"{sig.get('job_id','?')}:{sig.get('mtime','')}:"
+                f"{sig.get('source_path','')}")
+    elif sig_type == "cron_no_agent_candidates":
+        return (f"cron_no_agent_candidates:{sig.get('profile_count',0)}:"
+                f"{sig.get('candidate_fingerprint','?')}:"
+                f"{sig.get('report_day','?')}")
     elif sig_type == "ops_gate_result":
         return (f"ops_gate:{sig.get('task_id','?')}:"
                 f"{sig.get('ts','')}:{sig.get('pass','')}")
@@ -185,10 +222,20 @@ def _build_signal_dedup_key(sig: dict) -> str:
                 (m["skill"], m["mention_count"]) for m in sig.get("top_mentions", [])
             ] + [
                 (k["keyword"], k["count"]) for k in sig.get("top_keywords", [])
+            ] + [
+                (
+                    "quality_concern",
+                    sig.get("quality_concern_count", 0),
+                    sig.get("quality_concern_fingerprint", ""),
+                )
             ], sort_keys=True)))
     elif sig_type == "gateway_health":
         return "gateway_health:" + str(hash(
             json.dumps(sig.get("hourly_alerts", []), sort_keys=True)))
+    elif sig_type == "mcp_health":
+        return (f"mcp_health:{sig.get('server_name','?')}:"
+                f"{sig.get('connect_ok','')}:{sig.get('tool_count','')}:"
+                f"{sig.get('latency_bucket','')}:{sig.get('error_class','')}")
     else:
         return (f"unknown:{hash(json.dumps(sig, sort_keys=True))}")
 
@@ -262,6 +309,78 @@ def collect_ops_gate_signals(days: int = 1) -> list[dict]:
 # ── Signal Source 2: cron task status ────────────────────────────────
 
 
+_CRON_PROMPT_SCAN_BLOCK_RE = re.compile(
+    r"CronPromptInjectionBlocked|prompt[- ]?injection|threat pattern|prompt scanner",
+    re.IGNORECASE,
+)
+
+
+def _classify_cron_output(content: str) -> tuple[bool, str, bool]:
+    """Return (has_error, failure_kind, prompt_scan_blocked) without exposing body text."""
+    lines = content.split("\n")
+    prompt_scan_blocked = bool(_CRON_PROMPT_SCAN_BLOCK_RE.search(content))
+    if prompt_scan_blocked:
+        return True, "prompt_scan_blocked", True
+
+    exit_error_re = re.compile(
+        r"\b(?:exit\s+code\s*:\s*[1-9]\d*|exit\s+status\s*:\s*[1-9]\d*)",
+        re.IGNORECASE,
+    )
+    if exit_error_re.search(content):
+        return True, "nonzero_exit", False
+
+    traceback_re = re.compile(
+        r"Traceback\s*\(most recent call last\)|Traceback:\s*/",
+        re.IGNORECASE,
+    )
+    tb_match = traceback_re.search(content)
+    if tb_match:
+        tb_start = content.rfind("\n", 0, tb_match.start()) + 1
+        tb_end = content.find("\n", tb_match.end())
+        tb_line = content[tb_start:tb_end] if tb_end >= 0 else content[tb_start:]
+        stripped = tb_line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            if not ("`" in tb_line and re.search(r"`.*Traceback.*`", tb_line, re.I)):
+                if not re.search(
+                    r"\b(?:use|example|like|such as|documentation|note|usage)\b.*Traceback",
+                    tb_line,
+                    re.I,
+                ):
+                    return True, "traceback", False
+
+    error_marker_re = re.compile(r"\b(?:ERROR:|FATAL:|FAILED:|Error:|Failed:)", re.I)
+    clean_marker_re = re.compile(
+        r"\b(PASS|passed|success|successfully|null|none|exit\s+code\s*:\s*0)\b",
+        re.IGNORECASE,
+    )
+    for line in lines:
+        if not error_marker_re.search(line):
+            continue
+        stripped = line.strip()
+        if clean_marker_re.search(line):
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            continue
+        if re.search(r"\b(risk_level|priority|severity)\b", line, re.I):
+            continue
+        if re.search(r"\berror:\s*(null|none|false|0|无)\b", line, re.I):
+            continue
+        if re.search(r"\bfailed:\s*(false|null|none|0)\b", line, re.I):
+            continue
+        if re.search(
+            r"\b(lesson|behavioral|instruction|concept|definition|explanation|suggestion|proposal)\b",
+            line,
+            re.I,
+        ):
+            if not re.search(r"\b(occurred|thrown|raised|detected|caused)\b", line, re.I):
+                continue
+        if "`" in stripped and re.search(r"`(ERROR|FAILED|CRITICAL)`", stripped, re.I):
+            continue
+        return True, "error_marker", False
+
+    return False, "ok", False
+
+
 def collect_cron_signals(days: int = 1) -> list[dict]:
     signals = []
     cutoff = time.time() - days * 86400
@@ -269,102 +388,240 @@ def collect_cron_signals(days: int = 1) -> list[dict]:
     if not CRON_OUTPUT_DIR.exists():
         return signals
 
-    for job_dir in CRON_OUTPUT_DIR.iterdir():
+    summary = {
+        "summary_day": today_str(),
+        "period_days": days,
+        "jobs_scanned": 0,
+        "runs_scanned": 0,
+        "ok_runs": 0,
+        "failure_runs": 0,
+        "prompt_scan_blocks": 0,
+        "failed_jobs": [],
+    }
+    failed_jobs: set[str] = set()
+    job_states = {}
+
+    for job_dir in sorted(CRON_OUTPUT_DIR.iterdir()):
         if not job_dir.is_dir():
             continue
+        job_seen = False
+        job_run_count = 0
+        job_failure_count = 0
+        last_mtime = ""
         for f in sorted(job_dir.glob("*.md")):
-            if f.stat().st_mtime < cutoff:
+            try:
+                st = f.stat()
+            except OSError:
                 continue
-            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=TZ).isoformat()
-            content = f.read_text()
-            lines = content.split('\n')
+            if st.st_mtime < cutoff:
+                continue
 
-            # ── has_error detection (V1.3a: P-20260428-av-v13a) ──
-            # Layer 1 (PRIMARY): exit code != 0
-            # This is the most reliable signal — a non-zero exit means the job failed.
-            _exit_re = re.compile(
-                r'\b(?:exit\s+code\s*:\s*[1-9]\d*|exit\s+status\s*:\s*[1-9]\d*)',
-                re.IGNORECASE
-            )
-            has_exit_code_error = bool(_exit_re.search(content))
+            if not job_seen:
+                summary["jobs_scanned"] += 1
+                job_seen = True
 
-            # Layer 2 (ALWAYS): Python traceback — Never false positive
-            # GUARD: content-wide search + line-by-line context check
-            _traceback_re = re.compile(
-                r'Traceback\s*\(most recent call last\)|Traceback:\s*/',
-                re.IGNORECASE
-            )
-            _tb_match = _traceback_re.search(content)
-            has_traceback = False
-            if _tb_match:
-                # Extract the line containing the match
-                _tb_start = content.rfind('\n', 0, _tb_match.start()) + 1
-                _tb_end = content.find('\n', _tb_match.end())
-                _tb_line = content[_tb_start:_tb_end] if _tb_end >= 0 else content[_tb_start:]
-                _s = _tb_line.strip()
-                # Guard 1: markdown table rows
-                if _s.startswith('|') and _s.endswith('|'):
-                    pass  # skip
-                # Guard 2: backtick-quoted documentation
-                elif '`' in _tb_line and re.search(
-                        r'`.*Traceback.*`', _tb_line, re.I):
-                    pass  # skip
-                # Guard 3: prose/instruction documentation keywords
-                elif re.search(
-                        r'\b(?:use|example|like|such as|documentation|note|usage)\b.*Traceback',
-                        _tb_line, re.I):
-                    pass  # skip
-                else:
-                    has_traceback = True
+            mtime = datetime.fromtimestamp(st.st_mtime, tz=TZ).isoformat()
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
 
-            # Layer 3 (FALLBACK): regex context-aware error detection
-            # Only activates when exit_code is 0 or not found AND no traceback.
-            # Uses precise markers (ERROR:, FAILED:, etc.) with 8 guard layers
-            # to exclude tables, status reports, documentation.
-            has_context_error = False
-            if not has_exit_code_error and not has_traceback:
-                _error_marker_re = re.compile(
-                    r'\b(?:ERROR:|FATAL:|FAILED:|Error:|Failed:)',
-                    re.IGNORECASE
-                )
-                _clean_marker_re = re.compile(
-                    r'\b(PASS|passed|success|successfully|null|none|✅|exit\s+code\s*:\s*0)\b',
-                    re.IGNORECASE
-                )
-                for line in lines:
-                    if not _error_marker_re.search(line):
-                        continue
-                    s = line.strip()
-                    if _clean_marker_re.search(line):
-                        continue
-                    if s.startswith('|') and s.endswith('|'):
-                        continue
-                    if re.search(r'\b(risk_level|priority|severity)\b', line, re.I):
-                        continue
-                    if re.search(r'\berror:\s*(null|none|false|0|无)\b', line, re.I):
-                        continue
-                    if re.search(r'\bfailed:\s*(false|null|none|0)\b', line, re.I):
-                        continue
-                    if re.search(r'\b(lesson|behavioral|instruction|concept|definition|explanation|suggestion|proposal)\b', line, re.I):
-                        if not re.search(r'\b(occurred|thrown|raised|detected|caused)\b', line, re.I):
-                            continue
-                    if '`' in s and re.search(r'`(ERROR|FAILED|CRITICAL)`', s, re.IGNORECASE):
-                        continue
-                    if re.search(r'[建议替换检测使用]', s):
-                        continue
-                    has_context_error = True
-                    break
+            has_error, failure_kind, prompt_scan_blocked = _classify_cron_output(content)
+            summary["runs_scanned"] += 1
+            job_run_count += 1
+            last_mtime = mtime
+            if has_error:
+                summary["failure_runs"] += 1
+                job_failure_count += 1
+                failed_jobs.add(job_dir.name)
+                signals.append({
+                    "ts": now_iso(),
+                    "type": "cron_failure",
+                    "source": "cron-output",
+                    "job_id": job_dir.name,
+                    "source_path": str(f),
+                    "mtime": mtime,
+                    "failure_kind": failure_kind,
+                })
+            else:
+                summary["ok_runs"] += 1
 
-            # Final determination: exit_code is PRIMARY, regex is FALLBACK
-            has_error = has_exit_code_error or has_traceback or has_context_error
+            if prompt_scan_blocked:
+                summary["prompt_scan_blocks"] += 1
+                signals.append({
+                    "ts": now_iso(),
+                    "type": "cron_prompt_scan_block",
+                    "source": "cron-output",
+                    "profile": "main",
+                    "job_id": job_dir.name,
+                    "source_path": str(f),
+                    "mtime": mtime,
+                    "reason": "cron prompt scanner blocked assembled prompt",
+                })
+
+        if job_run_count:
+            job_states[job_dir.name] = {
+                "last_status": "failed" if job_failure_count else "ok",
+                "failure_count": job_failure_count,
+                "last_mtime": last_mtime,
+            }
+
+    summary["failed_jobs"] = sorted(failed_jobs)
+    summary_fingerprint = _stable_hash(summary)
+    cache = _load_cache(CRON_SIGNAL_CACHE)
+    prev_job_states = cache.get("job_states", {}) if isinstance(cache, dict) else {}
+    for job_id, state in sorted(job_states.items()):
+        prev_state = prev_job_states.get(job_id, {})
+        if prev_state.get("last_status") == "failed" and state.get("last_status") == "ok":
             signals.append({
                 "ts": now_iso(),
-                "type": "cron_result",
+                "type": "cron_recovery",
                 "source": "cron-output",
-                "job_id": job_dir.name,
-                "file": str(f),
-                "mtime": mtime,
-                "has_error": has_error,
+                "job_id": job_id,
+                "mtime": state.get("last_mtime", ""),
+                "previous_status": "failed",
+                "current_status": "ok",
+            })
+
+    should_emit_summary = (
+        cache.get("last_summary_day") != summary["summary_day"]
+        or cache.get("last_summary_fingerprint") != summary_fingerprint
+        or summary["failure_runs"] > 0
+    )
+    if should_emit_summary:
+        _save_cache(CRON_SIGNAL_CACHE, {
+            "last_summary_day": summary["summary_day"],
+            "last_summary_fingerprint": summary_fingerprint,
+            "job_states": job_states,
+        })
+        signals.append({
+            "ts": now_iso(),
+            "type": "cron_signal_summary",
+            "source": "cron-output",
+            "signal_weight": 0.65,
+            "summary_fingerprint": summary_fingerprint,
+            **summary,
+        })
+    elif cache.get("job_states") != job_states:
+        _save_cache(CRON_SIGNAL_CACHE, {
+            "last_summary_day": cache.get("last_summary_day"),
+            "last_summary_fingerprint": cache.get("last_summary_fingerprint"),
+            "job_states": job_states,
+        })
+
+    return signals
+
+
+def _load_cron_jobs(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    jobs = data.get("jobs", data) if isinstance(data, dict) else data
+    if isinstance(jobs, dict):
+        jobs = list(jobs.values())
+    return [j for j in jobs if isinstance(j, dict)]
+
+
+def _active_cron_job(job: dict) -> bool:
+    if job.get("enabled") is False:
+        return False
+    if job.get("paused") is True:
+        return False
+    status = str(job.get("status") or job.get("state") or "").lower()
+    return status not in {"disabled", "paused", "complete", "completed"}
+
+
+def _script_for_job(job: dict) -> str:
+    return str(job.get("script") or job.get("script_path") or job.get("command") or "")
+
+
+def collect_cron_policy_signals(days: int = 1) -> list[dict]:
+    """Emit low-noise cron policy visibility: no_agent candidates and prompt-scan blocks."""
+    del days
+    signals = []
+    candidates = []
+    job_files = [
+        ("main", CRON_JOBS_FILE),
+        ("sannai", SANNAI_CRON_JOBS_FILE),
+    ]
+
+    for profile, path in job_files:
+        for job in _load_cron_jobs(path):
+            job_id = str(job.get("id") or job.get("job_id") or job.get("name") or "?")
+            job_name = str(job.get("name") or job_id)
+            last_error = str(job.get("last_error") or job.get("delivery_error") or "")
+            if last_error and _CRON_PROMPT_SCAN_BLOCK_RE.search(last_error):
+                signals.append({
+                    "ts": now_iso(),
+                    "type": "cron_prompt_scan_block",
+                    "source": "cron-jobs",
+                    "profile": profile,
+                    "job_id": job_id,
+                    "job_name": job_name,
+                    "mtime": str(job.get("last_run_at") or job.get("updated_at") or ""),
+                    "source_path": str(path),
+                    "reason": "cron job metadata reports prompt scanner block",
+                })
+
+            script = _script_for_job(job)
+            if not script or job.get("no_agent") is True or not _active_cron_job(job):
+                continue
+            skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
+            if not isinstance(skills, list):
+                skills = [str(skills)]
+            toolsets = job.get("enabled_toolsets") or job.get("toolsets") or []
+            if not isinstance(toolsets, list):
+                toolsets = [str(toolsets)]
+            delivery = str(job.get("deliver") or job.get("delivery") or job.get("target") or "")
+
+            reasons = ["script_backed_without_no_agent"]
+            confidence = "high"
+            if skills:
+                reasons.append("uses_skills")
+                confidence = "review_required"
+            if delivery in {"origin", "owner", "platform"}:
+                reasons.append(f"delivery_{delivery}")
+                confidence = "review_required"
+
+            candidates.append({
+                "profile": profile,
+                "job_id": job_id,
+                "job_name": job_name,
+                "script": script,
+                "confidence": confidence,
+                "reasons": reasons,
+                "skills": sorted(str(s) for s in skills),
+                "enabled_toolsets": sorted(str(t) for t in toolsets),
+                "delivery": delivery,
+                "recommended_action": "review_before_setting_no_agent",
+            })
+
+    if candidates:
+        candidates = sorted(candidates, key=lambda c: (c["profile"], c["job_id"]))
+        fingerprint = _stable_hash(candidates)
+        report_day = today_str()
+        cache = _load_cache(CRON_NO_AGENT_CACHE)
+        if (
+            cache.get("candidate_fingerprint") != fingerprint
+            or cache.get("last_report_day") != report_day
+        ):
+            _save_cache(CRON_NO_AGENT_CACHE, {
+                "candidate_fingerprint": fingerprint,
+                "last_report_day": report_day,
+            })
+            signals.append({
+                "ts": now_iso(),
+                "type": "cron_no_agent_candidates",
+                "source": "cron-jobs",
+                "signal_weight": 0.70,
+                "report_day": report_day,
+                "candidate_fingerprint": fingerprint,
+                "candidate_count": len(candidates),
+                "profile_count": len({c["profile"] for c in candidates}),
+                "candidates": candidates,
             })
 
     return signals
@@ -1253,6 +1510,36 @@ _CN_NOISE = frozenset({
 })
 
 
+QUALITY_TOPIC_KEYWORDS = ("\u8bb0\u5fc6",)
+QUALITY_CONCERN_KEYWORDS = (
+    "\u6df7\u4e71",
+    "\u4e71",
+    "\u641e\u9519",
+    "\u8bb0\u4e0d\u4f4f",
+    "\u8bb0\u9519",
+    "\u4e0d\u51c6",
+    "\u53c8\u5fd8",
+    "\u5fd8\u4e86",
+)
+
+
+def _quality_concern_matches(text: str) -> list[tuple[str, str]]:
+    """Return safe keyword pairs for user memory-quality complaints.
+
+    Privacy rule: callers store only the matched keyword pair plus session
+    reference metadata, never the original user message body.
+    """
+    matches = []
+    for topic in QUALITY_TOPIC_KEYWORDS:
+        if topic not in text:
+            continue
+        for concern in QUALITY_CONCERN_KEYWORDS:
+            if concern in text:
+                matches.append((topic, concern))
+                break
+    return matches
+
+
 def _tokenize_message(text: str) -> list[str]:
     """Split a user message into meaningful tokens for keyword counting.
 
@@ -1316,9 +1603,13 @@ def collect_recent_session_mentions(days: int = 3) -> list[dict]:
     # Collect user messages from recent JSONL files
     now_dt = datetime.now(TZ)
     cutoff = now_dt - timedelta(days=days)
+    quality_scan_days = max(days, int(os.environ.get("QUALITY_CONCERN_SCAN_DAYS", "7")))
+    quality_cutoff = now_dt - timedelta(days=quality_scan_days)
 
     skill_mention_counts: dict[str, int] = {}
     keyword_counts: dict[str, int] = {}
+    quality_concern_pairs: dict[tuple[str, str], int] = {}
+    quality_concern_refs: list[dict] = []
     total_user_msgs = 0
     files_scanned = 0
 
@@ -1326,18 +1617,19 @@ def collect_recent_session_mentions(days: int = 3) -> list[dict]:
     for fpath in jsonl_files:
         try:
             mtime = datetime.fromtimestamp(fpath.stat().st_mtime, tz=TZ)
-            if mtime < cutoff:
+            if mtime < quality_cutoff:
                 break
         except OSError:
             continue
 
         files_scanned += 1
+        in_recent_window = mtime >= cutoff
         try:
             raw_text = fpath.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
 
-        for line in raw_text.strip().split("\n"):
+        for line_no, line in enumerate(raw_text.strip().split("\n"), start=1):
             line = line.strip()
             if not line:
                 continue
@@ -1361,36 +1653,75 @@ def collect_recent_session_mentions(days: int = 3) -> list[dict]:
             if not msg_text:
                 continue
 
-            total_user_msgs += 1
             msg_lower = msg_text.lower()
 
-            # Count skill name mentions
-            for skill in skill_names:
-                if skill in msg_lower:
-                    skill_mention_counts[skill] = skill_mention_counts.get(skill, 0) + 1
+            if in_recent_window:
+                total_user_msgs += 1
 
-            # Count topic keywords (tokenized, never stores raw text)
-            for token in _tokenize_message(msg_text):
-                if token not in skill_names:
-                    keyword_counts[token] = keyword_counts.get(token, 0) + 1
+                # Count skill name mentions
+                for skill in skill_names:
+                    if skill in msg_lower:
+                        skill_mention_counts[skill] = skill_mention_counts.get(skill, 0) + 1
+
+                # Count topic keywords (tokenized, never stores raw text)
+                for token in _tokenize_message(msg_text):
+                    if token not in skill_names:
+                        keyword_counts[token] = keyword_counts.get(token, 0) + 1
+
+            # Count explicit user quality complaints without storing message text.
+            for topic, concern in _quality_concern_matches(msg_text):
+                pair = (topic, concern)
+                quality_concern_pairs[pair] = quality_concern_pairs.get(pair, 0) + 1
+                if len(quality_concern_refs) < 20:
+                    quality_concern_refs.append({
+                        "session_ref": f"sessions/{fpath.name}:{line_no}",
+                        "session_id": fpath.stem,
+                        "line_number": line_no,
+                        "topic_keyword": topic,
+                        "concern_keyword": concern,
+                    })
 
     # Top 20 mentioned skills
     top_skills = sorted(skill_mention_counts.items(), key=lambda x: -x[1])[:20]
 
     # Top 15 topic keywords
     top_keywords = sorted(keyword_counts.items(), key=lambda x: -x[1])[:15]
+    quality_concern_keywords = [
+        {
+            "topic_keyword": topic,
+            "concern_keyword": concern,
+            "count": count,
+        }
+        for (topic, concern), count in sorted(
+            quality_concern_pairs.items(),
+            key=lambda item: (-item[1], item[0][0], item[0][1]),
+        )
+    ]
+    quality_concern_fingerprint = _stable_hash(quality_concern_keywords)
+    quality_concern_count = sum(quality_concern_pairs.values())
 
-    if total_user_msgs > 0:
+    if total_user_msgs > 0 or quality_concern_count > 0:
         signal = {
             "ts": ts,
             "type": "recent_session_mention",
             "source": "sessions-jsonl",
+            "summary": (
+                f"recent session mentions: user_messages={total_user_msgs}, "
+                f"quality_concern_count={quality_concern_count}"
+            ),
             "total_user_messages": total_user_msgs,
             "files_scanned": files_scanned,
             "scan_days": days,
+            "quality_concern_scan_days": quality_scan_days,
             "total_unique_skills_mentioned": len(skill_mention_counts),
             "total_unique_keywords": len(keyword_counts),
             "signal_weight": 0.70,
+            "quality_concern": quality_concern_count > 0,
+            "actionable_qualified": quality_concern_count > 0,
+            "quality_concern_count": quality_concern_count,
+            "quality_concern_keywords": quality_concern_keywords,
+            "quality_concern_refs": quality_concern_refs,
+            "quality_concern_fingerprint": quality_concern_fingerprint,
             "top_mentions": [
                 {"skill": name, "mention_count": count}
                 for name, count in top_skills
@@ -1407,6 +1738,186 @@ def collect_recent_session_mentions(days: int = 3) -> list[dict]:
 
 # ── Gateway Health ────────────────────────────────────────────────
 
+# ── MCP Health ────────────────────────────────────────────────────────
+
+def _run_command(args: list[str], timeout: int = 10) -> dict:
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "timeout",
+            "error_class": "timeout",
+        }
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "command_not_found",
+            "error_class": "command_not_found",
+        }
+    except Exception:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "command_failed",
+            "error_class": "command_failed",
+        }
+
+    return {
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+        "error_class": "" if result.returncode == 0 else "command_failed",
+    }
+
+
+def _parse_mcp_servers(stdout: str) -> list[dict]:
+    servers = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("MCP Servers:", "Name", "─")):
+            continue
+        if "enabled" not in stripped.lower() and "disabled" not in stripped.lower():
+            continue
+        parts = re.split(r"\s{2,}", stripped)
+        if len(parts) < 4:
+            continue
+        name, transport, tool_scope, status = parts[:4]
+        if not re.match(r"^[A-Za-z0-9_.-]+$", name):
+            continue
+        servers.append({
+            "server_name": name,
+            "transport": transport,
+            "tool_scope": tool_scope,
+            "enabled": "enabled" in status.lower(),
+        })
+    return servers
+
+
+def _mcp_latency_bucket(latency_ms: int | None) -> str:
+    if latency_ms is None:
+        return "unavailable"
+    if latency_ms < 1000:
+        return "lt_1s"
+    if latency_ms < 3000:
+        return "1s_to_3s"
+    if latency_ms < 8000:
+        return "3s_to_8s"
+    return "ge_8s"
+
+
+def _mcp_error_class(result: dict, stdout: str) -> str:
+    if result.get("error_class"):
+        return str(result["error_class"])
+    text = f"{stdout}\n{result.get('stderr','')}".lower()
+    if "connection refused" in text:
+        return "connection_refused"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "oauth" in text or "auth" in text:
+        return "auth_error"
+    if "tools discovered" not in text and result.get("ok"):
+        return "tool_discovery_missing"
+    return "command_failed"
+
+
+def collect_mcp_health_signals() -> list[dict]:
+    """Probe enabled MCP servers through Hermes CLI and emit only state changes."""
+    signals = []
+    list_result = _run_command(["hermes", "mcp", "list"], timeout=8)
+    if not list_result["ok"]:
+        state = {
+            "__list__": {
+                "connect_ok": False,
+                "error_class": list_result.get("error_class") or "command_failed",
+            }
+        }
+        cache = _load_cache(MCP_HEALTH_CACHE)
+        if cache.get("servers") != state:
+            _save_cache(MCP_HEALTH_CACHE, {"servers": state})
+            signals.append({
+                "ts": now_iso(),
+                "type": "mcp_health",
+                "source": "mcp",
+                "server_name": "__list__",
+                "enabled": False,
+                "connect_ok": False,
+                "latency_ms": None,
+                "latency_bucket": "unavailable",
+                "tool_count": None,
+                "error_class": state["__list__"]["error_class"],
+            })
+        return signals
+
+    servers = _parse_mcp_servers(list_result["stdout"])
+    prev_cache = _load_cache(MCP_HEALTH_CACHE)
+    prev_servers = prev_cache.get("servers", {}) if isinstance(prev_cache, dict) else {}
+    curr_servers = {}
+
+    for server in servers:
+        name = server["server_name"]
+        if not server["enabled"]:
+            curr_servers[name] = {
+                "enabled": False,
+                "connect_ok": False,
+                "latency_bucket": "disabled",
+                "tool_count": None,
+                "error_class": "disabled",
+            }
+            continue
+
+        result = _run_command(["hermes", "mcp", "test", name], timeout=12)
+        stdout = result["stdout"]
+        latency_match = re.search(r"Connected\s*\((\d+)ms\)", stdout)
+        tools_match = re.search(r"Tools discovered:\s*(\d+)", stdout)
+        latency_ms = int(latency_match.group(1)) if latency_match else None
+        tool_count = int(tools_match.group(1)) if tools_match else None
+        connect_ok = bool(result["ok"] and latency_match and tools_match)
+        error_class = "" if connect_ok else _mcp_error_class(result, stdout)
+        latency_bucket = _mcp_latency_bucket(latency_ms)
+
+        curr_servers[name] = {
+            "enabled": True,
+            "connect_ok": connect_ok,
+            "latency_bucket": latency_bucket,
+            "tool_count": tool_count,
+            "error_class": error_class,
+        }
+
+        if prev_servers.get(name) != curr_servers[name]:
+            signals.append({
+                "ts": now_iso(),
+                "type": "mcp_health",
+                "source": "mcp",
+                "server_name": name,
+                "transport": server["transport"],
+                "enabled": True,
+                "connect_ok": connect_ok,
+                "latency_ms": latency_ms,
+                "latency_bucket": latency_bucket,
+                "tool_count": tool_count,
+                "error_class": error_class,
+            })
+
+    if prev_servers != curr_servers:
+        _save_cache(MCP_HEALTH_CACHE, {"servers": curr_servers})
+
+    return signals
+
+
 # Thresholds for gateway health signals (per hour, except noted)
 # Derived from 25 days of gateway log analysis:
 #   - Normal baseline: network_error=2/hr, reconnect=1/hr
@@ -1420,6 +1931,10 @@ GATEWAY_THRESHOLDS = {
     "send_timeout": 3,
     "fallback_ip": 0,
     "polling_conflict": 0,
+    "auto_resume": 0,
+    "session_restored": 0,
+    "gateway_recovery": 0,
+    "wedged_updater": 0,
 }
 
 _GATEWAY_PATTERNS = {
@@ -1434,6 +1949,13 @@ _GATEWAY_PATTERNS = {
     "send_timeout": re.compile(r"telegram\.error\.TimedOut", re.IGNORECASE),
     "fallback_ip": re.compile(r"using sticky fallback IP", re.IGNORECASE),
     "polling_conflict": re.compile(r"terminated by other getUpdates", re.IGNORECASE),
+    "auto_resume": re.compile(r"\bauto[- ]?resume\b|resuming session", re.IGNORECASE),
+    "session_restored": re.compile(r"restored session|session restored", re.IGNORECASE),
+    "gateway_recovery": re.compile(r"\brecovery\b|recovering session", re.IGNORECASE),
+    "wedged_updater": re.compile(
+        r"wedged updater|Updater not running after reconnect heartbeat|Polling heartbeat probe failed",
+        re.IGNORECASE,
+    ),
 }
 
 _GATEWAY_WINDOWS = {
@@ -1443,6 +1965,10 @@ _GATEWAY_WINDOWS = {
     "send_timeout": "hour",
     "fallback_ip": "day",
     "polling_conflict": "day",
+    "auto_resume": "hour",
+    "session_restored": "hour",
+    "gateway_recovery": "hour",
+    "wedged_updater": "hour",
 }
 
 
@@ -1516,12 +2042,24 @@ def collect_gateway_health_signals() -> list[dict]:
                 "threshold": threshold,
             })
 
+    alert_fingerprint = _stable_hash(hourly_alerts)
+    cache = _load_cache(GATEWAY_HEALTH_CACHE)
+    if not hourly_alerts:
+        if cache.get("alert_fingerprint"):
+            _save_cache(GATEWAY_HEALTH_CACHE, {"alert_fingerprint": ""})
+        return signals
+    if cache.get("alert_fingerprint") == alert_fingerprint:
+        return signals
+
+    _save_cache(GATEWAY_HEALTH_CACHE, {"alert_fingerprint": alert_fingerprint})
+
     # ── Emit one signal per day with all alerts ──
     if hourly_alerts:
         signals.append({
             "ts": ts,
             "type": "gateway_health",
             "source": "gateway",
+            "alert_fingerprint": alert_fingerprint,
             "total_hours_scanned": len(hourly_events),
             "total_daily_events": dict(sorted(daily_events.items())),
             "alert_count": len(hourly_alerts),
@@ -1534,13 +2072,31 @@ def collect_gateway_health_signals() -> list[dict]:
 # ── Main ─────────────────────────────────────────────────────────────
 
 
-def main():
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Collect privacy-safe self-evolution signals."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print candidate signals without appending signals or updating caches.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None):
+    global DRY_RUN
+    args = parse_args(argv)
+    if args.dry_run:
+        DRY_RUN = True
+
     days = int(os.environ.get("COLLECT_DAYS", "1"))
     all_signals = []
 
     collectors = [
         ("ops-gate", collect_ops_gate_signals),
         ("cron", collect_cron_signals),
+        ("cron-policy", collect_cron_policy_signals),
         ("config", collect_config_signals),
         ("memory", collect_memory_signals),
         ("skill-health", collect_skill_health_signals),
@@ -1556,6 +2112,7 @@ def main():
         ("platform-status", collect_platform_status_signals),
         ("protected-skills", collect_protected_skills_signals),
         ("session-mentions", collect_recent_session_mentions),
+        ("mcp-health", collect_mcp_health_signals),
         # Phase O3: Gateway communication health
         ("gateway-health", collect_gateway_health_signals),
     ]
@@ -1644,13 +2201,15 @@ def main():
             continue
         dedup_keys.add(key)
         line = json.dumps(sig, ensure_ascii=False)
-        with open(SIGNALS_FILE, "a") as f:
-            f.write(line + "\n")
+        if not DRY_RUN:
+            with open(SIGNALS_FILE, "a") as f:
+                f.write(line + "\n")
         written_count += 1
 
     # Output machine-readable summary as JSON
     output = {
         "ts": now_iso(),
+        "dry_run": DRY_RUN,
         "total_signals": len(all_signals),
         "written_count": written_count,
         "skipped_duplicates": skipped_count,

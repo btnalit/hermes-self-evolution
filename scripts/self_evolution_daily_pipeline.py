@@ -2,7 +2,7 @@
 """
 Self-Evolution Daily Pipeline — replaces prompt-driven 04:00 cron.
 
-Executes the fixed 7-step pipeline, records each step with full audit trail,
+Executes the fixed self-evolution pipeline, records each step with full audit trail,
 and exits cleanly. Designed to be called by cron, not by agent prompt.
 
 Usage:
@@ -37,14 +37,18 @@ STEPS = [
     {"name": "proposal_cleanup",       "cmd": ["python3", str(SCRIPTS_DIR / "proposal_router.py"), "--cleanup"]},
     {"name": "proposal_verify",        "cmd": ["python3", str(SCRIPTS_DIR / "proposal_router.py"), "--verify-implemented"]},
     {"name": "agenda_maturation",      "cmd": ["python3", str(SCRIPTS_DIR / "agenda_maturation.py"), "--write-journal"]},
+    {"name": "unmatched_signal_review", "cmd": ["python3", str(SCRIPTS_DIR / "unmatched_signal_review.py"), "--days", "3", "--write"]},
+    {"name": "unmatched_cluster_ledger", "cmd": ["python3", str(SCRIPTS_DIR / "unmatched_cluster_ledger.py"), "--write", "--apply-auto-archive"]},
+    {"name": "new_agenda_preview",     "cmd": ["python3", str(SCRIPTS_DIR / "new_agenda_preview.py"), "--apply"]},
     {"name": "speak_gate",             "cmd": ["python3", str(SCRIPTS_DIR / "speak_gate.py"), "--include-agenda-candidates"]},
+    {"name": "new_agenda_apply_ready", "cmd": ["python3", str(SCRIPTS_DIR / "new_agenda_apply.py"), "--apply-ready", "--apply"]},
     {"name": "build_runtime_digest",   "cmd": ["python3", str(SCRIPTS_DIR / "build_runtime_digest.py")]},
-    # Step 7: Build Evolution Console (MkDocs static site)
+    # Build Evolution Console (MkDocs static site)
     {"name": "build_console", "cmd": [
         "bash", "-c",
         f"cd {CONSOLE_DIR} && {VENV_PYTHON} scripts/build_console.py && {VENV_MKDOCS} build"
     ]},
-    # Step 8: Restart Console via systemd (auto-restart on crash, auto-start on boot)
+    # Restart Console via systemd (auto-restart on crash, auto-start on boot)
     {"name": "restart_console_server", "cmd": [
         "bash", "-c",
         "systemctl restart hermes-evolution-console.service"
@@ -60,9 +64,25 @@ OUTPUT_CHECKS = {
         STATE_DIR / "agenda_candidates.yaml",
         STATE_DIR / "self_agenda.yaml",
     ],
+    "unmatched_signal_review": [
+        STATE_DIR / "unmatched_signal_review.yaml",
+        STATE_DIR / "unmatched_signal_review.md",
+    ],
+    "unmatched_cluster_ledger": [
+        STATE_DIR / "diagnostics" / "unmatched_clusters.yaml",
+        STATE_DIR / "self_agenda.yaml",
+    ],
+    "new_agenda_preview": [
+        STATE_DIR / "agenda_candidates.yaml",
+    ],
     "speak_gate": [
         STATE_DIR / "agenda_speak_decisions.yaml",
         STATE_DIR / "agenda_speak_quota.json",
+    ],
+    "new_agenda_apply_ready": [
+        STATE_DIR / "self_agenda.yaml",
+        STATE_DIR / "agenda_candidates.yaml",
+        STATE_DIR / "new_agenda_apply_audit.yaml",
     ],
     "build_runtime_digest": [
         STATE_DIR / "runtime_digest.md",
@@ -82,6 +102,10 @@ EVOLUTION_FILES = [
     STATE_DIR / "self_agenda.yaml",
     STATE_DIR / "signals.jsonl",
     STATE_DIR / "proposal_queue.yaml",
+    STATE_DIR / "unmatched_signal_review.yaml",
+    STATE_DIR / "unmatched_signal_review.md",
+    STATE_DIR / "diagnostics" / "unmatched_clusters.yaml",
+    STATE_DIR / "new_agenda_apply_audit.yaml",
 ]
 
 # Critical files that must NEVER be written/modified by this pipeline
@@ -330,6 +354,69 @@ def write_evidence(result, dry_run):
     print(f"  Evidence written: {evidence_file}")
 
 
+def print_cron_delivery_instruction(result):
+    """Print an explicit instruction for the outer cron agent delivery layer."""
+    if result.get("failures"):
+        print()
+        print("## CRON_DELIVERY_INSTRUCTION")
+        print("The pipeline has failed steps. Final response MUST report the failed step names and must not be [SILENT].")
+        print("Failed steps:", ", ".join(result.get("failures") or []))
+        return
+
+    decisions_path = STATE_DIR / "agenda_speak_decisions.yaml"
+    surfaced = []
+    summary = {}
+    try:
+        import yaml
+
+        decisions_data = yaml.safe_load(decisions_path.read_text()) or {}
+        summary = decisions_data.get("summary") or {}
+        surfaced = [
+            d for d in decisions_data.get("decisions", [])
+            if isinstance(d, dict) and d.get("decision") == "surface"
+        ]
+    except Exception as exc:
+        print()
+        print("## CRON_DELIVERY_INSTRUCTION")
+        print("Could not read agenda speak decisions. Final response MUST report this diagnostic and must not be [SILENT].")
+        print(f"Diagnostic: {type(exc).__name__}: {exc}")
+        return
+
+    print()
+    print("## CRON_DELIVERY_INSTRUCTION")
+    if surfaced:
+        print("Agenda speak gate surfaced item(s). Final response MUST NOT be [SILENT].")
+        print("Use this concise Telegram-ready report as the final response:")
+        print()
+        print("Self-Evolution 发现一个成熟议题：")
+        for d in surfaced:
+            gate = d.get("secondary_gate") or {}
+            print(f"- 议题：{d.get('title', d.get('candidate_id', 'unknown'))}")
+            print(f"  - candidate_id: {d.get('candidate_id', 'unknown')}")
+            print(f"  - decision: {d.get('decision')}")
+            print(f"  - action: {d.get('mapped_action')}")
+            print(f"  - reason: {d.get('reason')}")
+            print(f"  - evidence_strength: {gate.get('evidence_strength')}")
+            print(f"  - actionable_qualified_count: {gate.get('actionable_qualified_count')}")
+            preview = str(d.get("message_preview") or "").strip()
+            if preview:
+                print("  - message_preview:")
+                for line in preview.splitlines():
+                    print(f"    {line}")
+        print()
+        print(
+            f"Pipeline status: {result.get('steps_succeeded')}/{result.get('total_steps')} passed. "
+            "This is advisory; executable changes still require owner approval."
+        )
+        return
+
+    if summary.get("total_candidates", 0):
+        print("Agenda candidates existed but none surfaced. Final response may be [SILENT] unless there were pipeline failures.")
+        print(f"summary: {summary}")
+    else:
+        print("No agenda candidates surfaced and pipeline passed. Final response may be [SILENT].")
+
+
 def main():
     dry_run = "--dry-run" in sys.argv
 
@@ -342,6 +429,7 @@ def main():
         print("=" * 60)
     else:
         write_evidence(result, dry_run)
+        print_cron_delivery_instruction(result)
         print()
         print("=" * 60)
         if result["failures"]:

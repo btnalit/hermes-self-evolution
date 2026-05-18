@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agenda Maturation Engine — V1.4.1c init-qualified semantic fix.
+Agenda Maturation Engine — V1.4.1c init-qualified semantic fix + CW-004 signal classification.
 
 Changes from V1.4.1b:
 - Split qualified evidence into structural_qualified and actionable_qualified.
@@ -11,9 +11,13 @@ Changes from V1.4.1b:
 - recurrence_density based on actionable evidence only.
 - candidate_ready gate requires actionable_qualified_evidence_count >= 2.
 - score_explanations show structural/actionable classification per evidence.
+- CW-004 hard filter: structural and ops-review-only signal types cannot drive
+  scoring through evidence_strength, trend, recurrence, or candidate_ready.
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
 import os
@@ -58,6 +62,13 @@ MIN_EV_STRENGTH_BY_TYPE = {
     "cleanup_candidate": 0.25,
 }
 
+# CW-018: Evidence strength should reflect accumulated actionable signal
+# strength, not the average weight of low-weight telemetry. With the old
+# average-weight formula, many repeated actionable entries at 0.05/0.10 could
+# never pass the 0.25-0.30 type gate. A strength total of 1.5 represents enough
+# repeated, relevant actionable evidence for a full evidence-strength signal.
+ACTIONABLE_STRENGTH_FULL_EVIDENCE = 1.50
+
 # ── V1.4.1c: Actionable-qualified caps for trend_strength ──
 # 0 actionable qualified evidence → cap trend ≤ 0.10 (only init/structural)
 # 1 actionable qualified evidence or weak actionable strength → cap ≤ 0.35
@@ -70,6 +81,48 @@ ZERO_QUALIFIED_RECUR_CEILING = 0.10
 
 # ── V1.4.1b: Maturity ceiling when zero qualified at all ──
 ZERO_QUALIFIED_MATURITY_CEILING = 0.50
+
+# ── CW-004: Signal classification registry ──
+# This table is the implementation source of truth. Structural evidence can
+# keep an agenda item explainable, but must not drive maturity scoring.
+# Ops-review-only signals are surfaced to operators without becoming scoring
+# evidence.
+SIGNAL_CLASSIFICATION = {
+    "ops_gate_result": "actionable",
+    "ops-gate": "actionable",
+    "proposal_feedback": "actionable",
+    "verified_proposal": "actionable",
+    "config_change": "actionable",
+    "cron_result": "actionable",
+    "cron": "actionable",
+    "cron_failure": "actionable",
+    "cron_recovery": "actionable",
+    "cron_prompt_scan_block": "actionable",
+    "mcp_health": "actionable",
+    "gateway_health": "actionable",
+    "tool_reliability": "actionable",
+    "recent_session_mention": "conditional_actionable",
+    "skill_health_delta": "conditional_actionable",
+    "self_agenda_init": "structural",
+    "cron_signal_summary": "structural",
+    "skill_health_snapshot": "structural",
+    "skill_lifecycle_state": "structural",
+    "skill_lifecycle_summary": "structural",
+    "session_metadata": "structural",
+    "cron_no_agent_candidates": "ops_review_only",
+}
+
+STRUCTURAL_EVIDENCE_SOURCES = {
+    source for source, cls in SIGNAL_CLASSIFICATION.items() if cls == "structural"
+}
+
+OPS_REVIEW_ONLY_EVIDENCE_SOURCES = {
+    source for source, cls in SIGNAL_CLASSIFICATION.items() if cls == "ops_review_only"
+}
+
+ACTIONABLE_EVIDENCE_SOURCES = {
+    source for source, cls in SIGNAL_CLASSIFICATION.items() if cls == "actionable"
+}
 
 
 # ── I/O helpers ──
@@ -131,10 +184,28 @@ def _build_signal_dedup_key(sig: dict) -> str:
     sig_type = sig.get("type", "")
     if sig_type == "skill_health":
         return (f"skill_health:{sig.get('skill','?')}:{sig.get('ts','')}:{sig.get('stale','')}")
+    elif sig_type == "skill_health_delta":
+        newly = ",".join(sorted(sig.get("newly_stale", []) or []))
+        recovered = ",".join(sorted(sig.get("recovered", []) or []))
+        return f"skill_health_delta:{sig.get('ts','')}:{newly}:{recovered}"
     elif sig_type == "cron_result":
         return (f"cron:{sig.get('job_id','?')}:{sig.get('mtime','')}:{sig.get('has_error','')}")
+    elif sig_type in ("cron_recovery", "cron_failure"):
+        return (f"{sig_type}:{sig.get('job_id','?')}:{sig.get('mtime','')}:"
+                f"{sig.get('previous_status','')}:{sig.get('current_status','')}:"
+                f"{sig.get('failure_kind','')}")
+    elif sig_type == "cron_prompt_scan_block":
+        return (f"cron_prompt_scan_block:{sig.get('profile','?')}:"
+                f"{sig.get('job_id','?')}:{sig.get('mtime','')}:{sig.get('source_path','')}")
     elif sig_type == "ops_gate_result":
         return (f"ops_gate:{sig.get('task_id','?')}:{sig.get('ts','')}:{sig.get('pass','')}")
+    elif sig_type == "mcp_health":
+        return (f"mcp_health:{sig.get('server_name','?')}:{sig.get('ts','')}:"
+                f"{sig.get('connect_ok','')}:{sig.get('tool_count','')}:"
+                f"{sig.get('latency_bucket','')}:{sig.get('error_class','')}")
+    elif sig_type == "gateway_health":
+        return (f"gateway_health:{sig.get('ts','')}:"
+                f"{sig.get('alert_fingerprint','')}:{sig.get('alert_count','')}")
     elif sig_type == "config_change":
         return (f"config:{sig.get('path','?')}:{sig.get('mtime','')}")
     elif sig_type == "proposal_feedback":
@@ -153,6 +224,17 @@ def _build_evidence_dedup_key(ev: dict) -> str:
     source = ev.get("source", "")
     at = ev.get("at", "")
     summary = ev.get("summary", "")
+    stored_key = ev.get("evidence_dedup_key")
+    if stored_key and source in {
+        "skill_health_delta",
+        "cron_recovery",
+        "cron_failure",
+        "cron_prompt_scan_block",
+        "mcp_health",
+        "gateway_health",
+    }:
+        return stored_key
+
     if source == "skill_health":
         skill_match = re.search(r'"skill"\s*:\s*"([^"]+)"', summary)
         stale_match = re.search(r'"stale"\s*:\s*(true|false)', summary)
@@ -198,6 +280,9 @@ def _is_qualified_evidence(item: dict, ev: dict) -> tuple[bool, str, float]:
     weight = ev.get("weight", 0.1)
     summary = ev.get("summary", "")
 
+    if source in OPS_REVIEW_ONLY_EVIDENCE_SOURCES:
+        return (False, f"ops_review_only ({source})", 0.0)
+
     # Compute relevance based on source type and content
     relevance = _compute_relevance(item_type, source, summary)
     contribution = round(weight * relevance, 3)
@@ -206,9 +291,13 @@ def _is_qualified_evidence(item: dict, ev: dict) -> tuple[bool, str, float]:
         "strategic_positioning": {"session_metadata", "recent_session_mention", "verified_proposal", "config_change"},
         "automation_opportunity": {"repeated_manual_work", "user_correction",
                                     "opportunity_for_automation"},
-        "quality_improvement": {"ops_gate_result", "proposal_feedback", "verified_proposal"},
-        "cleanup_candidate": {"recent_session_mention", "config_change"},
-        "risk_watch": {"ops_gate_result", "cron_result", "tool_reliability"},
+        "quality_improvement": {"ops_gate_result", "proposal_feedback", "verified_proposal",
+                                "cron_recovery", "cron_failure", "cron_prompt_scan_block",
+                                "mcp_health", "gateway_health"},
+        "cleanup_candidate": {"recent_session_mention", "config_change", "skill_health_delta"},
+        "risk_watch": {"ops_gate_result", "cron_result", "tool_reliability",
+                       "cron_recovery", "cron_failure", "cron_prompt_scan_block",
+                       "mcp_health", "gateway_health"},
     }
 
     item_strong = strong_sources.get(item_type, set())
@@ -246,6 +335,10 @@ def _compute_relevance(item_type: str, source: str, summary: str) -> float:
             if any(kw in sl for kw in idle_indicators):
                 return 0.60
             return 0.20
+        if source == "skill_health_delta":
+            if "newly_stale" in sl and '"newly_stale":[]' not in sl.replace(" ", ""):
+                return 0.75
+            return 0.20
         if source == "config_change":
             if "archive" in sl or "cleanup" in sl:
                 return 0.70
@@ -268,8 +361,12 @@ def _compute_relevance(item_type: str, source: str, summary: str) -> float:
         return 0.10
 
     elif item_type == "quality_improvement":
-        if source == "ops_gate_result":
+        if source in ("ops_gate_result", "gateway_health"):
             return 0.80
+        if source in ("cron_recovery", "cron_failure", "cron_prompt_scan_block"):
+            return 0.70
+        if source == "mcp_health":
+            return 0.65
         if source == "proposal_feedback":
             return 0.75
         if source == "verified_proposal":
@@ -283,8 +380,14 @@ def _compute_relevance(item_type: str, source: str, summary: str) -> float:
             if "fail" in sl or "timeout" in sl or "error" in sl:
                 return 0.90
             return 0.30
-        if source == "cron_result":
+        if source in ("cron_result", "cron_recovery", "cron_failure", "cron_prompt_scan_block"):
             return 0.50
+        if source == "gateway_health":
+            return 0.75
+        if source == "mcp_health":
+            if "false" in sl or "error" in sl or "timeout" in sl:
+                return 0.80
+            return 0.40
         if source == "tool_reliability":
             return 0.60
         return 0.10
@@ -296,6 +399,32 @@ def _compute_relevance(item_type: str, source: str, summary: str) -> float:
         return 0.20
 
     return 0.10
+
+
+def _is_negative_skill_health_delta(summary: str) -> bool:
+    """Return true only when skill health moved worse, not when it recovered."""
+    normalized = summary.replace(" ", "").lower()
+    if '"newly_stale":[]' in normalized:
+        return False
+    return "newly_stale" in normalized or "stale" in normalized
+
+
+def _is_actionable_evidence(ev: dict) -> bool:
+    """Hard filter for evidence allowed to drive agenda maturity scoring."""
+    source = ev.get("source", "")
+    summary = ev.get("summary", "")
+
+    if source in OPS_REVIEW_ONLY_EVIDENCE_SOURCES:
+        return False
+    if source in STRUCTURAL_EVIDENCE_SOURCES:
+        return False
+    if source == "skill_health_delta":
+        return _is_negative_skill_health_delta(summary)
+    if source == "recent_session_mention":
+        return bool(ev.get("actionable_qualified") or ev.get("quality_concern"))
+    if source in ACTIONABLE_EVIDENCE_SOURCES:
+        return True
+    return False
 
 
 # ── Evidence matching (V1.4.1b: stores qualified flag) ──
@@ -356,6 +485,17 @@ def match_evidence(item: dict, signals: list[dict], proposals: list[dict]) -> tu
             "relevance": round(relevance, 2),
             "contribution": round(weight * relevance, 3),
         }
+        if st == "recent_session_mention":
+            for meta_key in (
+                "quality_concern",
+                "actionable_qualified",
+                "quality_concern_count",
+                "quality_concern_keywords",
+                "quality_concern_refs",
+                "quality_concern_fingerprint",
+            ):
+                if meta_key in sig:
+                    evidence_entry[meta_key] = sig.get(meta_key)
         new_evidence.append(evidence_entry)
         existing_dedup_keys.add(dedup_key)
         signal_hits += 1
@@ -442,16 +582,15 @@ def _calc_evidence_stats(item: dict) -> dict:
 
     qualified_count = len(qualified_entries)
 
-    # V1.4.1c: Split into structural_qualified and actionable_qualified
-    # self_agenda_init is structural only — keeps item alive but doesn't drive maturity
+    # V1.4.1c + CW-004: Split into structural_qualified and actionable_qualified.
+    # Structural evidence keeps the item explainable but contributes zero score.
     structural_qualified_entries = []
     actionable_qualified_entries = []
     for ev in qualified_entries:
-        source = ev.get("source", "")
-        if source == "self_agenda_init":
-            structural_qualified_entries.append(ev)
-        else:
+        if _is_actionable_evidence(ev):
             actionable_qualified_entries.append(ev)
+        else:
+            structural_qualified_entries.append(ev)
 
     actionable_qualified_count = len(actionable_qualified_entries)
     structural_qualified_count = len(structural_qualified_entries)
@@ -471,6 +610,7 @@ def _calc_evidence_stats(item: dict) -> dict:
     fresh_actionable = sum(1 for e in actionable_qualified_entries if e.get("at", "").startswith(today))
 
     avg_weight = 0.0
+    actionable_avg_weight = 0.0
     sum_weighted_relevance = 0.0
     if qualified_entries:
         avg_weight = sum(e.get("weight", 0.1) for e in qualified_entries) / len(qualified_entries)
@@ -480,6 +620,12 @@ def _calc_evidence_stats(item: dict) -> dict:
             sum_weighted_relevance += e.get("weight", 0.1) * relevance
     elif unique_entries:
         avg_weight = sum(e.get("weight", 0.1) for e in unique_entries) / len(unique_entries)
+
+    if actionable_qualified_entries:
+        actionable_avg_weight = (
+            sum(e.get("weight", 0.1) for e in actionable_qualified_entries)
+            / len(actionable_qualified_entries)
+        )
 
     last_at = ""
     if unique_entries:
@@ -497,6 +643,7 @@ def _calc_evidence_stats(item: dict) -> dict:
         "fresh_qualified_count": fresh_qualified,
         "fresh_actionable_count": fresh_actionable,
         "avg_weight": round(avg_weight, 4),
+        "actionable_avg_weight": round(actionable_avg_weight, 4),
         "sum_weighted_relevance": round(sum_weighted_relevance, 3),
         "last_evidence_at": last_at,
     }
@@ -529,16 +676,17 @@ def calculate_scores(item: dict) -> dict:
     fresh_actionable = stats["fresh_actionable_count"]
     unqualified_among_unique = stats["unqualified_among_unique"]
     avg_weight = stats["avg_weight"]
+    actionable_avg_weight = stats["actionable_avg_weight"]
     sum_weighted_relevance = stats["sum_weighted_relevance"]
 
     # ── evidence_strength ──
-    # Based on qualified evidence: weighted average × saturation
-    if qualified_count > 0:
-        evidence_strength = min(1.0, avg_weight * min(1.0, qualified_count / 5))
-    elif unique_count > 0:
-        # No qualified evidence but has unique — use weak contribution
-        total_weight = sum(e.get("weight", 0.1) for e in evidence_list)
-        evidence_strength = min(0.15, total_weight / len(evidence_list) * min(1.0, len(evidence_list) / 10))
+    # CW-004: only actionable qualified evidence can drive score. Structural
+    # evidence and ops-review-only signals contribute zero, not a low weight.
+    if actionable_qualified_count > 0:
+        evidence_strength = min(
+            1.0,
+            actionable_qualified_strength / ACTIONABLE_STRENGTH_FULL_EVIDENCE,
+        )
     else:
         evidence_strength = 0.0
 
@@ -634,6 +782,77 @@ def calculate_scores(item: dict) -> dict:
 
 # ── State machine (V1.4.1b) ──
 
+RISK_WATCH_PATTERN_KEY_VERSION = "v2"
+
+
+def _strip_volatile_event_fields(value):
+    if isinstance(value, dict):
+        volatile = {
+            "ts",
+            "timestamp",
+            "generated_at",
+            "updated_at",
+            "mtime",
+            "last_run_at",
+            "next_run_at",
+        }
+        return {
+            key: _strip_volatile_event_fields(inner)
+            for key, inner in sorted(value.items())
+            if key not in volatile
+        }
+    if isinstance(value, list):
+        return [_strip_volatile_event_fields(item) for item in value]
+    return value
+
+
+def _risk_watch_event_key(ev: dict) -> str:
+    summary = ev.get("summary", "")
+    source = ev.get("source", "")
+    if isinstance(summary, dict):
+        parsed = summary
+    else:
+        parsed = None
+        if isinstance(summary, str):
+            stripped = summary.strip()
+            if stripped.startswith("{"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+
+    if isinstance(parsed, dict):
+        parts = [
+            source,
+            parsed.get("type"),
+            parsed.get("server") or parsed.get("server_name") or parsed.get("job_id") or parsed.get("task_name"),
+            (
+                parsed.get("error_class")
+                or parsed.get("status")
+                or parsed.get("alert_fingerprint")
+                or parsed.get("previous_status")
+                or parsed.get("current_status")
+            ),
+        ]
+        stable_parts = [str(part) for part in parts if part not in (None, "")]
+        if stable_parts:
+            return f"{RISK_WATCH_PATTERN_KEY_VERSION}:json:" + ":".join(stable_parts)
+
+        stable_payload = _strip_volatile_event_fields(parsed)
+        rendered = json.dumps(stable_payload, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+        return f"{RISK_WATCH_PATTERN_KEY_VERSION}:json-hash:{source}:{digest}"
+
+    if isinstance(summary, str):
+        task_match = re.search(r"task\s+(\S+)", summary)
+        if task_match:
+            return f"{RISK_WATCH_PATTERN_KEY_VERSION}:text-task:{task_match.group(1)}"
+        error_type = summary.split(":", 1)[0] if ":" in summary else summary[:80]
+        return f"{RISK_WATCH_PATTERN_KEY_VERSION}:text:{error_type.strip()}"
+
+    return f"{RISK_WATCH_PATTERN_KEY_VERSION}:unknown:{source}:{type(summary).__name__}"
+
+
 def advance_state(item: dict, scores: dict) -> str:
     item_type = item.get("type", "")
     status = item.get("status", "observing")
@@ -664,14 +883,11 @@ def advance_state(item: dict, scores: dict) -> str:
             try:
                 ev_dt = datetime.fromisoformat(ev.get("at", ""))
                 if (datetime.now(TZ) - ev_dt) < timedelta(hours=24):
-                    summary = ev.get("summary", "")
-                    task_match = re.search(r"task\s+(\S+)", summary)
-                    task_name = task_match.group(1) if task_match else summary[:40]
-                    recent_24h.setdefault(task_name, []).append(ev)
+                    recent_24h.setdefault(_risk_watch_event_key(ev), []).append(ev)
             except (ValueError, TypeError):
                 pass
 
-        for task_name, failures in recent_24h.items():
+        for event_key, failures in recent_24h.items():
             if len(failures) >= 2:
                 return "bypass_maturation_to_speak_gate"
 
@@ -680,13 +896,11 @@ def advance_state(item: dict, scores: dict) -> str:
             try:
                 ev_dt = datetime.fromisoformat(ev.get("at", ""))
                 if (datetime.now(TZ) - ev_dt) < timedelta(days=7):
-                    summary = ev.get("summary", "")
-                    error_type = summary.split(":")[0] if ":" in summary else summary[:30]
-                    recent_7d.setdefault(error_type, []).append(ev)
+                    recent_7d.setdefault(_risk_watch_event_key(ev), []).append(ev)
             except (ValueError, TypeError):
                 pass
 
-        for error_type, failures in recent_7d.items():
+        for event_key, failures in recent_7d.items():
             if len(failures) >= 3:
                 return "generate_quality_proposal"
 
@@ -795,10 +1009,9 @@ def explain_scores(items: list[dict], signals: list[dict], proposals: list[dict]
                 qual_reason_str = ev.get("qualify_reason", "matched at collection")
                 relevance = ev.get("relevance", 0.2)
 
-            # V1.4.1c: Structural vs actionable classification
-            ev_source = ev.get("source", "")
-            is_structural = is_qual and ev_source == "self_agenda_init"
-            is_actionable = is_qual and not is_structural
+            # V1.4.1c + CW-004: Structural vs actionable classification
+            is_actionable = is_qual and _is_actionable_evidence(ev)
+            is_structural = is_qual and not is_actionable
             drives_trend = is_actionable
             drives_recurrence = is_actionable
             drives_candidate_ready = is_actionable
@@ -1050,24 +1263,39 @@ def write_journal(items: list[dict], changed_ids: list[str],
 
 # ── Candidate emission ──
 
-def emit_candidates(items: list[dict]) -> list[dict]:
+def emit_candidates(items: list[dict], *, write: bool = True) -> list[dict]:
     now = now_iso()
     candidates = []
     for item in items:
         decision = item.get("_decision", "")
-        if decision != "candidate_ready":
+        if decision == "candidate_ready":
+            status = "candidate_ready"
+            action_type = MATURITY_ACTION_MAP.get(item.get("type", ""), "")
+            candidate_kind = "agenda_candidate"
+        elif decision == "generate_quality_proposal":
+            status = "quality_proposal_ready"
+            action_type = "generate_quality_proposal"
+            candidate_kind = "quality_proposal"
+        else:
             continue
-        action_type = MATURITY_ACTION_MAP.get(item.get("type", ""), "")
+        agenda_id = item.get("id", "?")
+        scores = item.get("scores", {})
         candidates.append({
-            "agenda_id": item.get("id", "?"),
+            "candidate_id": agenda_id,
+            "agenda_id": agenda_id,
             "title": item.get("title", ""),
             "type": item.get("type", ""),
-            "maturity_score": item.get("scores", {}).get("maturity_score", 0),
+            "maturity_score": scores.get("maturity_score", 0),
+            "evidence_strength": scores.get("evidence_strength", 0),
             "action": action_type,
-            "status": "candidate_ready",
+            "status": status,
+            "candidate_kind": candidate_kind,
+            "source_decision": decision,
+            "requires_owner_approval": True,
+            "proposal_queue_write": False,
             "evidence_count": item.get("counters", {}).get("evidence_count", 0),
-            "qualified_evidence_count": item.get("scores", {}).get("qualified_evidence_count", 0),
-            "actionable_qualified_count": item.get("scores", {}).get("actionable_qualified_count", 0),
+            "qualified_evidence_count": scores.get("qualified_evidence_count", 0),
+            "actionable_qualified_count": scores.get("actionable_qualified_count", 0),
             "observation_days": item.get("counters", {}).get("observation_days", 0),
             "suggested_message": _build_suggested_message(item),
             "generated_at": now,
@@ -1079,7 +1307,8 @@ def emit_candidates(items: list[dict]) -> list[dict]:
         "shadow_mode": True,
         "candidates": candidates,
     }
-    write_yaml(CANDIDATES_FILE, data)
+    if write:
+        write_yaml(CANDIDATES_FILE, data)
     return candidates
 
 
@@ -1124,11 +1353,23 @@ def count_mentions(item: dict, signals: list[dict]) -> int:
 
 # ── Main ──
 
-def main():
-    explain_mode = "--explain-scores" in sys.argv
-    dry_run = "--dry-run" in sys.argv
-    write_journal_flag = "--write-journal" in sys.argv
-    emit_flag = "--emit-candidates" in sys.argv or write_journal_flag
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Mature self-evolution agenda items from collected signals."
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Preview without writing agenda state.")
+    parser.add_argument("--write-journal", action="store_true", help="Write the maturation journal.")
+    parser.add_argument("--emit-candidates", action="store_true", help="Use candidate-ready journal mode.")
+    parser.add_argument("--explain-scores", action="store_true", help="Print and write score explanations.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None):
+    args = parse_args(argv)
+    explain_mode = args.explain_scores
+    dry_run = args.dry_run
+    write_journal_flag = args.write_journal
+    emit_flag = args.emit_candidates or write_journal_flag
 
     agenda = load_yaml(AGENDA_FILE)
     items = agenda.get("agenda_items", [])
@@ -1240,7 +1481,7 @@ def main():
 
     print()
 
-    candidates = emit_candidates(items)
+    candidates = emit_candidates(items, write=not dry_run)
     if candidates:
         print(f"  Candidates emitted: {len(candidates)}")
         for c in candidates:
