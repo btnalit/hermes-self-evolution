@@ -63,18 +63,20 @@ if [ -x "$(command -v hermes)" ]; then
         if grep -q "hermes-self-evolution" "$HERMES_HOME/config.yaml" 2>/dev/null; then
             echo "   ⏭️  插件已在 config.yaml 中注册"
         else
-            python3 << 'PYFIX' 2>&1 && echo "   ✅ 插件已注册到 config.yaml，重启 gateway 后生效"
-import yaml, os
-path = os.environ["HERMES_HOME"] + "/config.yaml"
-with open(path) as f:
-    cfg = yaml.safe_load(f)
-plugins = cfg.setdefault("plugins", {})
-enabled = plugins.setdefault("enabled", [])
-if "hermes-self-evolution" not in enabled:
-    enabled.append("hermes-self-evolution")
-with open(path, "w") as f:
-    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-PYFIX
+            # 纯 sed 实现，无需 pyyaml
+            CONFIG_FILE="$HERMES_HOME/config.yaml"
+            if grep -q "enabled: \[\]" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i 's/enabled: \[\]/enabled: [hermes-self-evolution]/' "$CONFIG_FILE"
+                echo "   ✅ 插件已注册到 config.yaml"
+            elif grep -q "enabled: \[" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i 's/enabled: \[\(.*\)\]/enabled: [\1, hermes-self-evolution]/' "$CONFIG_FILE"
+                echo "   ✅ 插件已注册到 config.yaml"
+            elif grep -q "^  enabled:" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i '/^  enabled:/a\  - hermes-self-evolution' "$CONFIG_FILE"
+                echo "   ✅ 插件已注册到 config.yaml"
+            else
+                echo "   ⚠️  无法识别的 plugins.enabled 格式，请手动添加"
+            fi
         fi
     else
         echo "   ⏭️  跳过插件安装"
@@ -119,9 +121,23 @@ echo -e "\n🧪 [5/5] 安装依赖 + 运行测试"
 if $AUTO_YES; then REPLY="y"; else read -rp "   是否安装依赖并运行测试? [Y/n] " REPLY; fi
 REPLY="${REPLY:-y}"
 if [[ "$REPLY" =~ ^[Yy] ]]; then
-    # 安装 pyyaml
+    # 安装 pyyaml — 先检查是否已有，再用可用 pip 工具安装
     echo "   ▶ 安装 Python 依赖..."
-    pip3 install pyyaml -q 2>&1 | tail -1 || echo "   ⚠️  pyyaml 安装失败，部分功能可能受限"
+    if python3 -c "import yaml" 2>/dev/null; then
+        echo "   ✅ pyyaml 已可用"
+    else
+        PIP_OK=false
+        for pip_cmd in pip3 pip "python3 -m pip" "python -m pip"; do
+            if $pip_cmd install pyyaml -q 2>/dev/null; then
+                PIP_OK=true
+                echo "   ✅ pyyaml 已安装"
+                break
+            fi
+        done
+        if ! $PIP_OK; then
+            echo "   ⚠️  pyyaml 安装失败（无可用 pip），pipeline 依赖需手动安装"
+        fi
+    fi
 
     # 测试采集
     echo "   ▶ 收集信号..."
