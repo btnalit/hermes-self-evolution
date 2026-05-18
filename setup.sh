@@ -44,15 +44,20 @@ STATE_DIR="$HERMES_HOME/state/evolution"
 echo ""
 echo "⏰ Cron job setup (self-evolution pipeline)"
 echo "   The pipeline requires these cron jobs:"
-echo "     1. Daily pipeline at 04:00 (collect → route → mature → speak → digest)"
+echo "     1. Daily pipeline at 04:00 (12-step: collect → unmatched → cluster → preview → apply → digest → mature → route → speak → console → restart → delivery)"
 echo "     2. Weekly strategy on Monday 07:00"
 echo ""
-echo "   To set them up manually, add to crontab:"
-echo "   # Self-Evolution Governor daily pipeline"
-echo "   0 4 * * * cd $SKILL_DIR/scripts && HERMES_HOME=$HERMES_HOME python3 collect_signals.py && python3 proposal_router.py --cleanup && python3 proposal_router.py --verify-implemented && python3 agenda_maturation.py --emit-candidates && python3 speak_gate.py --include-agenda-candidates && python3 build_runtime_digest.py"
+echo "   To set them up, install via Hermes cron (recommended):"
 echo ""
-echo "   # Weekly strategic review"
-echo "   0 7 * * 1 cd $SKILL_DIR/scripts && HERMES_HOME=$HERMES_HOME COLLECT_DAYS=7 python3 collect_signals.py && python3 agenda_maturation.py --emit-candidates && python3 build_runtime_digest.py"
+echo "     hermes cron create \\"
+echo '       --schedule "0 4 * * *" \'
+echo '       --script "'"$SOURCE_DIR"'/scripts/self_evolution_daily_pipeline.py" \'
+echo '       --name "self-evolution-daily" \'
+echo '       --no-agent'
+echo ""
+echo "   OR add to crontab manually:"
+echo "   # Self-Evolution Governor daily pipeline (12 steps)"
+echo "   0 4 * * * cd $SOURCE_DIR/scripts && HERMES_HOME=$HERMES_HOME python3 self_evolution_daily_pipeline.py"
 echo ""
 
 # 5. Runtime digest injection (optional)
