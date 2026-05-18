@@ -127,10 +127,13 @@ if [[ "$REPLY" =~ ^[Yy] ]]; then
         echo "   ✅ pyyaml 已可用"
     else
         PIP_OK=false
-        # 按优先级检测 pip：Hermes venv → pip3 → python3 -m pip → apt
-        HERMES_PIP=$(command -v hermes 2>/dev/null && hermes info 2>/dev/null | grep -oP 'python\S+' | head -1 | xargs -I{} dirname {} 2>/dev/null || true)
-        HERMES_PIP="${HERMES_PIP:+$HERMES_PIP/pip}"
-        for pip_cmd in "${HERMES_PIP:-}" pip3 "python3 -m pip" "python -m pip"; do
+        # 按优先级检测 pip：Hermes venv → pip3 → python3 -m pip
+        VENV_PIP=""
+        if command -v hermes &>/dev/null; then
+            HERMES_REAL=$(readlink -f "$(command -v hermes)" 2>/dev/null || true)
+            [ -n "$HERMES_REAL" ] && VENV_PIP="$(dirname "$HERMES_REAL")/pip3"
+        fi
+        for pip_cmd in "${VENV_PIP:-}" pip3 "python3 -m pip"; do
             [ -z "$pip_cmd" ] && continue
             echo -n "      → 尝试 $pip_cmd ... "
             if $pip_cmd install pyyaml -q 2>&1; then
