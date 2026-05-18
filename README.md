@@ -10,50 +10,47 @@
 
 ---
 
-A self-contained **metacognitive governance system** for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It runs a daily pipeline that collects environmental signals, scores improvement opportunities, matures strategic agendas, and injects runtime context back into agent sessions — closing the feedback loop without requiring code changes to the Hermes core.
+A self-contained **metacognitive governance system** for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It runs a daily 12-step pipeline that collects environmental signals, reviews unmatched patterns, matures strategic agendas, routes proposals through a 10-state lifecycle, and injects runtime context back into agent sessions — closing the feedback loop without requiring code changes to the Hermes core.
 
 ## Architecture Overview
 
 ```
-                          SELF-EVOLUTION CLOSED LOOP
-                                ┌─────────────────┐
-                    ┌──────────▶│  1. COLLECT      │
-                    │           │  (16 signal src) │
-                    │           └────────┬─────────┘
-                    │                    ▼
-                    │           ┌─────────────────┐
-                    │           │  2. MATURE       │
-                    │           │  (agenda engine) │
-                    │           └────────┬─────────┘
-                    │                    ▼
-                    │           ┌─────────────────┐
-                    │           │  3. SPEAK GATE   │
-                    │           │  (score + quota) │
-                    │           └────────┬─────────┘
-                    │                    ▼
-                    │           ┌─────────────────┐
-                    │           │  4. PROPOSE      │
-                    │           │  (queue + route) │
-                    │           └────────┬─────────┘
-                    │                    ▼
-                    │           ┌─────────────────┐
-                    │           │  5. INJECT       │
-                    │           │  (runtime digest)│
-                    │           └────────┬─────────┘
-                    │                    ▼
-                    │     User reviews → approves → executes
-                    │                    │
-                    └────────────────────┘
+                          SELF-EVOLUTION DAILY PIPELINE (04:00)
+
+  ┌──────────┐   ┌─────────────┐   ┌──────────────┐   ┌────────────┐   ┌────────────────┐
+  │ Collect  │──▶│ Unmatched   │──▶│ Unmatched    │──▶│ New Agenda │──▶│ New Agenda     │
+  │ Signals  │   │ Signal Rev. │   │ Cluster      │   │ Preview    │   │ Apply Ready    │
+  └──────────┘   └─────────────┘   └──────────────┘   └────────────┘   └───────┬────────┘
+                                                                                │
+  ┌──────────┐   ┌─────────────┐   ┌──────────────┐   ┌────────────┐           │
+  │ Build    │◀──│ Speak Gate  │◀──│ Proposal     │◀──│ Agenda     │◀──────────┘
+  │ Runtime  │   │ (score+quota)│   │ Router       │   │ Maturation │
+  │ Digest   │   └─────────────┘   └──────────────┘   └────────────┘
+  └────┬─────┘
+       │
+  ┌────▼─────┐   ┌─────────────┐   ┌──────────────┐
+  │ Build    │──▶│ Restart     │──▶│ Cron Delivery │──▶ ops-gate evidence
+  │ Console  │   │ Console     │   │ Instruction   │
+  └──────────┘   └─────────────┘   └──────────────┘
+
+       │ runtime_digest.md → injected into every Hermes session
+       ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  HERMES SESSIONS: self_agenda → candidates → proposal_queue        │
+  │  → approved → pre_execution_design → ops-gate (no direct execute)  │
+  │  user feedback → signal loop → next pipeline cycle                  │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
-- **🔍 16+ Signal Sources** — Scans ops-gate results, cron status, skill health, memory quality, tool reliability, config changes, proposal feedback, gateway health, and more.
-- **📊 Two-Tier Scoring** — `priority_score` (worth talking about?) + `speak_score` (worth interrupting the user?) with risk dampeners, strategic bonuses, and daily quotas.
+- **🔍 13+ Signal Sources** — Scans ops-gate results, cron status, skill health, memory quality, tool reliability, config changes, proposal feedback, gateway health, Sannai cron, and more.
+- **📊 Agenda Maturation Engine** — Long-term agenda items mature over time as evidence accumulates (score = ev_strength × 0.35 + frequency × 0.25 + impact × 0.25 + recency × 0.15). Structural vs actionable evidence separation prevents false positives.
 - **📓 Evolution Journal** — Persistent timestamped audit trail of all observations, score changes, and proposal transitions.
-- **📋 Proposal State Machine** — 10-state lifecycle: `draft → pending → approved → scheduled → running → implemented → verified`.
-- **🧠 Agenda Maturation Engine** — Long-term agenda items mature over time as evidence accumulates. Structural vs actionable evidence separation prevents false positives.
-- **⚙️ Configurable Thresholds** — Defaults: maturity score 0.72, min evidence 3, observation window 3 days. All tunable.
+- **📋 Proposal State Machine** — 10-state lifecycle: `draft → submitted → pending_user_approval → approved / rejected / stale_pending → pre_execution_design → scheduled → running → implemented`.
+- **🧠 Speak Gate** — Two-tier scoring system. Quality gate (`ev_strength > 0.5`) + daily quota (1 surface/day) + agenda quota (1 per item). Controlled mode prevents external sends without approval.
+- **🔗 Unmatched Signal Pipeline** — Signals that don't match any agenda topic are reviewed, clustered, and proposed as new agenda items.
+- **⚙️ Configurable Thresholds** — Defaults: maturity score 0.72, min evidence 3, observation window 3 days. All tunable in `_maturation_config`.
 - **🔌 Optional Plugin** — `runtime_digest` auto-injection plugin for Hermes sessions (`on_session_start` hook).
 - **🚀 Zero Core Patches** — All scripts run from the skill directory. No modifications to Hermes source code needed.
 
@@ -68,35 +65,58 @@ cd hermes-self-evolution
 export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 bash setup.sh
 
-# Run the pipeline manually
+# Run the full pipeline manually
 cd "$HERMES_HOME/skills/dogfood/self-evolution-governor/scripts"
 python3 collect_signals.py
-python3 agenda_maturation.py --emit-candidates
+python3 unmatched_signal_review.py
+python3 unmatched_cluster_ledger.py
+python3 new_agenda_preview.py
+python3 new_agenda_apply_ready.py
 python3 build_runtime_digest.py
+python3 agenda_maturation.py --write-journal --emit-candidates
+python3 proposal_router.py --cleanup
+python3 proposal_router.py --verify-implemented
+python3 speak_gate.py --include-agenda-candidates
 
 # Optional: install the Hermes plugin
 hermes plugins install "$(pwd)/../../../../plugin/hermes-self-evolution" --enable
+```
+
+## Daily Cron Pipeline (04:00)
+
+The following 12-step pipeline runs every day via `self_evolution_daily_pipeline.py`:
+
+```
+ 1. collect_signals.py               # 13+ signal groups
+ 2. unmatched_signal_review.py       # Review unmatched signals
+ 3. unmatched_cluster_ledger.py      # Cluster into new agenda topics
+ 4. new_agenda_preview.py            # Preview promising clusters
+ 5. new_agenda_apply_ready.py        # Apply to self_agenda.yaml
+ 6. build_runtime_digest.py          # Session context digest
+ 7. agenda_maturation.py             # Score + mature agenda items
+ 8. proposal_router.py --cleanup     # Clean stale proposals
+ 9. proposal_router.py --verify      # Verify implemented proposals
+10. speak_gate.py                    # Score + gate + decide
+11. build_console.py                 # Rebuild Evolution Console
+12. restart_console.py               # Reload MkDocs httpd
 ```
 
 ## Pipeline Scripts
 
 | Step | Script | Purpose | Input → Output |
 |------|--------|---------|----------------|
-| **1. Audit** | `collect_signals.py` | Collect 16 signal sources | state/ files, cron output → `signals.jsonl` |
-| **2. Route** | `proposal_router.py` | Proposal state machine + verify + cleanup | `proposal_queue.yaml` → Updated status |
-| **3. Mature** | `agenda_maturation.py` | Long-term agenda maturity engine | Agenda + signals → candidates |
-| **4. Gate** | `speak_gate.py` | Score, gate, quota for proposals | Proposals → speak/digest/silent decision |
-| **5. Inject** | `build_runtime_digest.py` | Generate session context digest | Signals + proposals → `runtime_digest.md` |
-
-**Daily cron order (04:00):**
-```
-1. collect_signals.py
-2. proposal_router.py --cleanup
-3. proposal_router.py --verify-implemented
-4. agenda_maturation.py --write-journal --emit-candidates
-5. speak_gate.py --include-agenda-candidates
-6. build_runtime_digest.py
-```
+| **1** | `collect_signals.py` | 13+ signal groups from ops, cron, skills, gateway, config | State files, cron → `signals.jsonl` |
+| **2** | `unmatched_signal_review.py` | Review signals that don't match any agenda topic | `signals.jsonl` → filtered unmatched pool |
+| **3** | `unmatched_cluster_ledger.py` | Cluster unmatched signals into potential new agenda topics | Unmatched → cluster ledger |
+| **4** | `new_agenda_preview.py` | Preview promising clusters as draft agenda items | Ledger → `new_agenda_preview.md` |
+| **5** | `new_agenda_apply_ready.py` | Apply confirmed agenda items to `self_agenda.yaml` | Preview → actual agenda insert |
+| **6** | `build_runtime_digest.py` | Generate session context digest | Signals + proposals → `runtime_digest.md` |
+| **7** | `agenda_maturation.py` | Score existing agenda items, emit candidates | Agenda + signals → candidates |
+| **8** | `proposal_router.py` | Proposal state machine + cleanup + verify | `proposal_queue.yaml` → updated status |
+| **9** | `speak_gate.py` | Score, gate, quota for proposals + candidates | Candidates → speak/digest/silent |
+| **10** | `build_console.py` | Rebuild Evolution Console static site | State → MkDocs pages |
+| **11** | `restart_console.py` | Reload httpd serving the console | Signal → systemctl → restart |
+| **12** | `self_evolution_daily_pipeline.py` | Orchestrator: runs all steps with error handling + cron delivery | All preceding outputs → evidence files |
 
 ## File Structure
 
@@ -107,15 +127,24 @@ hermes-self-evolution/
 ├── setup.sh                          # Idempotent deployment script
 ├── .gitignore
 │
+├── scripts/
+│   └── self_evolution_daily_pipeline.py  # 12-step pipeline orchestrator
+│
 ├── skills/self-evolution-governor/   # Core skill package
-│   ├── SKILL.md                      # 800-line skill definition
+│   ├── SKILL.md                      # 800-line skill definition (Chinese)
 │   ├── scripts/
-│   │   ├── _paths.py                 # Portable path resolver ($HERMES_HOME)
-│   │   ├── collect_signals.py        # 16 signal collectors
+│   │   ├── collect_signals.py        # 13+ signal collectors
+│   │   ├── unmatched_signal_review.py    # Unmatched signal review
+│   │   ├── unmatched_cluster_ledger.py   # Cluster into agenda topics
+│   │   ├── new_agenda_preview.py         # Draft agenda preview
+│   │   ├── new_agenda_apply_ready.py     # Apply agenda items
+│   │   ├── build_runtime_digest.py   # Session context digest
+│   │   ├── agenda_maturation.py      # Agenda maturity scoring (V1.4.1c)
 │   │   ├── proposal_router.py        # Proposal lifecycle state machine
-│   │   ├── agenda_maturation.py      # Agenda maturity scoring engine
-│   │   ├── speak_gate.py             # Two-tier scoring + quota system
-│   │   └── build_runtime_digest.py   # Session context digest builder
+│   │   ├── speak_gate.py             # Two-tier scoring + quota
+│   │   ├── agenda_candidate_closure.py   # Close candidates on approval
+│   │   ├── agenda_review_action.py       # Review action generator
+│   │   └── weekly_strategy_facts.py      # Strategic observations
 │   └── templates/
 │       └── proposal.yaml             # Proposal template
 │
@@ -124,65 +153,53 @@ hermes-self-evolution/
 │   ├── __init__.py                   # on_session_start hook
 │   └── README.md
 │
-├── demo/                             # Example state files
+├── demo/                             # Anonymized example state files
 │   ├── signals.jsonl.example
 │   ├── self_agenda.yaml.example
 │   ├── proposal_queue.yaml.example
 │   ├── agenda_candidates.yaml.example
+│   ├── agenda_speak_decisions.yaml.example
 │   ├── runtime_digest.md.example
-│   └── evolution_journal.md.example
+│   ├── evolution_journal.md.example
+│   └── HERMES_FOCUS.md.example
 │
 └── docs/
-    ├── architecture.md               # System architecture deep dive
+    ├── architecture.md               # V1.4.1c architecture deep dive
     └── tuning.md                     # Threshold configuration guide
 ```
 
 ## Prerequisites
 
-- **Hermes Agent** installed and running
-- **Python 3.10+**
-- **Unix-like environment** (Linux / macOS / WSL)
+- Hermes Agent 0.10+ (tested on 0.14.0)
+- Hermes HOME directory initialized (`~/.hermes` or `$HERMES_HOME`)
+- Skills directory structure: `$HERMES_HOME/skills/dogfood/`
+- Cron system for scheduling the daily pipeline
+- Optional: MkDocs for the Evolution Console
 
-## Configuration
+## Ecosystem Integration
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `min_score_to_surface` | 0.72 | Minimum maturity score to produce a candidate |
-| `min_evidence_count` | 3 | Minimum evidence entries before candidate_ready |
-| `min_observation_days` | 3 | Minimum observation window before surfacing |
-| `cooldown_days` | 7 | Don't re-surface same agenda item within N days |
-| `max_surface_per_day` | 1 | Max one mature agenda surfaced daily |
-
-See [`docs/tuning.md`](docs/tuning.md) for detailed tuning guidance and scenario-based profiles.
-
-## Plugin Installation (Optional)
-
-```bash
-hermes plugins install ./plugin/hermes-self-evolution --enable
+```
+Hermes Agent (main)         Sannai Profile (isolated)
+      │                            │
+      ├── collect_signals.py       ├── sannai cron status (separate)
+      ├── ops-gate evidence        │
+      ├── cron results             │
+      ├── skill/system health      │
+      └── session metadata         │
+              │                    │
+              └───── evolution ────┘
+                        │
+              ┌─────────┴──────────┐
+              │                    │
+         self_agenda.yaml    runtime_digest.md
+         proposal_queue       → injected into every
+         evolution_journal      Hermes session
 ```
 
-The plugin uses the `on_session_start` hook to log runtime digest availability. Actual digest injection happens via the skill's SKILL.md instructions, which are loaded into every session.
+## Changelog
 
-## Video Series
-
-- **Episode 1:** What is Self-Evolution Governance?
-- **Episode 2:** Architecture Deep Dive & Pipeline Walkthrough *(coming soon)*
-- **Episode 3:** Tuning & Production Deployment
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-All pipeline scripts must remain portable — use `_paths.py` for path resolution, never hardcode paths.
+See [CHANGELOG.md](CHANGELOG.md) for all version history.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
-
----
-
-*Built for Hermes Agent. Agents should improve themselves.*
+MIT
