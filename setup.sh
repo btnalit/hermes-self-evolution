@@ -121,21 +121,28 @@ echo -e "\n🧪 [5/5] 安装依赖 + 运行测试"
 if $AUTO_YES; then REPLY="y"; else read -rp "   是否安装依赖并运行测试? [Y/n] " REPLY; fi
 REPLY="${REPLY:-y}"
 if [[ "$REPLY" =~ ^[Yy] ]]; then
-    # 安装 pyyaml — 先检查是否已有，再用可用 pip 工具安装
+    # 安装 pyyaml — 检测所有可用 pip 工具，显示实际错误
     echo "   ▶ 安装 Python 依赖..."
     if python3 -c "import yaml" 2>/dev/null; then
         echo "   ✅ pyyaml 已可用"
     else
         PIP_OK=false
-        for pip_cmd in pip3 pip "python3 -m pip" "python -m pip"; do
-            if $pip_cmd install pyyaml -q 2>/dev/null; then
+        # 按优先级检测 pip：Hermes venv → pip3 → python3 -m pip → apt
+        HERMES_PIP=$(command -v hermes 2>/dev/null && hermes info 2>/dev/null | grep -oP 'python\S+' | head -1 | xargs -I{} dirname {} 2>/dev/null || true)
+        HERMES_PIP="${HERMES_PIP:+$HERMES_PIP/pip}"
+        for pip_cmd in "${HERMES_PIP:-}" pip3 "python3 -m pip" "python -m pip"; do
+            [ -z "$pip_cmd" ] && continue
+            echo -n "      → 尝试 $pip_cmd ... "
+            if $pip_cmd install pyyaml -q 2>&1; then
+                echo "✅"
                 PIP_OK=true
-                echo "   ✅ pyyaml 已安装"
                 break
             fi
+            echo "失败"
         done
         if ! $PIP_OK; then
-            echo "   ⚠️  pyyaml 安装失败（无可用 pip），pipeline 依赖需手动安装"
+            echo "   ⚠️  所有 pip 方式均失败。手动安装:"
+            echo "      apt install python3-pip && pip3 install pyyaml"
         fi
     fi
 
