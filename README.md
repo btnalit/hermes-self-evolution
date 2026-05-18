@@ -61,25 +61,22 @@ A self-contained **metacognitive governance system** for [Hermes Agent](https://
 git clone https://github.com/btnalit/hermes-self-evolution.git
 cd hermes-self-evolution
 
-# Install
-export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+# 交互式安装向导 — 一路按提示走即可
 bash setup.sh
 
-# Run the full pipeline manually
-cd "$HERMES_HOME/skills/dogfood/self-evolution-governor/scripts"
-python3 collect_signals.py
-python3 unmatched_signal_review.py
-python3 unmatched_cluster_ledger.py
-python3 new_agenda_preview.py
-python3 new_agenda_apply_ready.py
-python3 build_runtime_digest.py
-python3 agenda_maturation.py --write-journal --emit-candidates
-python3 proposal_router.py --cleanup
-python3 proposal_router.py --verify-implemented
-python3 speak_gate.py --include-agenda-candidates
+# 安装向导会自动完成：
+# ✅ 复制 skill 文件
+# ✅ 初始化状态文件
+# ✅ 询问是否安装 Hermes 插件（自动注入 runtime_digest）
+# ✅ 询问是否创建 cron 任务（每天 04:00）
+# ✅ 安装 Python 依赖（pyyaml）
+# ✅ 运行一次采集测试并显示结果
 
-# Optional: install the Hermes plugin
-hermes plugins install "$(pwd)/../../../../plugin/hermes-self-evolution" --enable
+# 静默安装（无人值守，全部默认 yes）
+bash setup.sh --yes
+
+# 验证安装成功
+cat ~/.hermes/state/evolution/runtime_digest.md
 ```
 
 ## Daily Cron Pipeline (04:00)
